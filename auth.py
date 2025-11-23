@@ -254,93 +254,86 @@ class AuthService:
             # Query sender_pool table from database - get active senders ordered by assigned_count
             log.debug("Querying sender_pool table from database...")
             
-            # First, try to get all senders to debug
-            all_senders_res = (
-                self.client
-                .from_("sender_pool")
-                .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
-                .execute()
-            )
-            
-            if all_senders_res.data:
-                log.debug(f"Found {len(all_senders_res.data)} total senders in pool")
-                for s in all_senders_res.data:
-                    log.debug(f"  - {s.get('smtp_email')}: is_active={s.get('is_active')} (type: {type(s.get('is_active'))})")
-            
-            # Query for active senders - handle both boolean true and string "true"/"Active"
+            # Query sender_pool table from database
+            # We fetch a batch and filter in Python to handle inconsistent 'is_active' types (bool vs string)
+            # This fixes the issue where text "true" in the database wasn't matching boolean True in the query
             res = (
                 self.client
                 .from_("sender_pool")
                 .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
-                .eq("is_active", True)
                 .order("assigned_count", desc=False)
-                .limit(1)
+                .limit(20) # Fetch top 20 candidates to find a valid one
                 .execute()
             )
 
-            # Check if we got any data from the database
-            if res.data and len(res.data) > 0:
-                row = res.data[0]
+            valid_sender = None
+
+            if res.data:
+                log.debug(f"Found {len(res.data)} potential senders in pool")
+
+                for row in res.data:
+                    # Robust check for is_active
+                    is_active_raw = row.get("is_active")
+                    is_active = False
+
+                    # Handle boolean, string, or int representations of truth
+                    if isinstance(is_active_raw, bool):
+                        is_active = is_active_raw
+                    elif isinstance(is_active_raw, str):
+                        is_active = is_active_raw.lower() in ('true', 'active', '1', 'yes', 't')
+                    elif isinstance(is_active_raw, int):
+                        is_active = is_active_raw == 1
+
+                    if not is_active:
+                        # log.debug(f"Skipping sender {row.get('smtp_email')}: not active (raw={is_active_raw})")
+                        continue
+
+                    # Check max_users
+                    max_users = row.get("max_users", 100)
+                    assigned_count = row.get("assigned_count", 0)
+
+                    if max_users is None: max_users = 100
+                    if assigned_count is None: assigned_count = 0
+
+                    if assigned_count < max_users:
+                        valid_sender = row
+                        break
+                    else:
+                        if should_log_warning:
+                            log.warning(f"Skipping sender {row.get('smtp_email')}: reached max limit ({assigned_count}/{max_users})")
+
+            if valid_sender:
+                row = valid_sender
                 sender_id = row.get("id")
                 
                 if should_log_warning:
                     log.info(f"Found active sender in sender_pool: {row.get('smtp_email')} (ID: {sender_id})")
                 
-                # Check if sender has reached max_users limit
-                max_users = row.get("max_users", 100)
-                assigned_count = row.get("assigned_count", 0)
-                
-                if max_users is not None and assigned_count is not None and assigned_count >= max_users:
+                # Increment assigned_count in database
+                try:
+                    if sender_id:
+                        new_count = (row.get("assigned_count", 0) or 0) + 1
+                        self.client.from_("sender_pool").update({
+                            "assigned_count": new_count
+                        }).eq("id", sender_id).execute()
+                        log.debug(f"Updated assigned_count for sender {sender_id} to {new_count}")
+                except Exception as update_error:
                     if should_log_warning:
-                        log.warning(f"Sender {row.get('smtp_email')} has reached max_users limit ({assigned_count}/{max_users}). Trying next sender...")
-                    # Try to find another sender
-                    res2 = (
-                        self.client
-                        .from_("sender_pool")
-                        .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
-                        .eq("is_active", True)
-                        .neq("id", sender_id)
-                        .order("assigned_count", desc=False)
-                        .limit(1)
-                        .execute()
-                    )
-                    
-                    if res2.data and len(res2.data) > 0:
-                        row = res2.data[0]
-                        sender_id = row.get("id")
-                        if should_log_warning:
-                            log.info(f"Using alternative sender: {row.get('smtp_email')} (ID: {sender_id})")
-                    else:
-                        if should_log_warning:
-                            log.warning("No alternative active sender found. Falling back to config SMTP.")
-                        row = None
+                        log.warning(f"Failed to update assigned_count: {update_error}")
                 
-                if row:
-                    # Increment assigned_count in database (optional - can be done asynchronously)
-                    try:
-                        if sender_id:
-                            new_count = (row.get("assigned_count", 0) or 0) + 1
-                            self.client.from_("sender_pool").update({
-                                "assigned_count": new_count
-                            }).eq("id", sender_id).execute()
-                            log.debug(f"Updated assigned_count for sender {sender_id} to {new_count}")
-                    except Exception as update_error:
-                        if should_log_warning:
-                            log.warning(f"Failed to update assigned_count: {update_error}")
-                    
-                    # Cache and return sender credentials from database
-                    result = {
-                        "success": True,
-                        "data": {
-                            "smtp_server": row["smtp_server"],
-                            "smtp_port": int(row["smtp_port"]) if row.get("smtp_port") else 587,
-                            "smtp_email": row["smtp_email"],
-                            "smtp_password": row["smtp_password"],
-                        },
-                    }
-                    self._sender_cache = result
-                    self._sender_cache_time = current_time
-                    return result
+                # Cache and return sender credentials from database
+                result = {
+                    "success": True,
+                    "data": {
+                        "smtp_server": row["smtp_server"],
+                        "smtp_port": int(row["smtp_port"]) if row.get("smtp_port") else 587,
+                        "smtp_email": row["smtp_email"],
+                        "smtp_password": row["smtp_password"],
+                    },
+                }
+                self._sender_cache = result
+                self._sender_cache_time = current_time
+                return result
             
             # No active sender found in database - try querying without is_active filter to see what we have
             if should_log_warning:
