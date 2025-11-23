@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
+.env
+*.env
+
+# Local Data & Logs
+*.db
+*.log
+*.txt
+captures/
+settings.json
+
+# IDE
+.vscode/
+.idea/
+
+# Node dependencies
+node_modules/
+npm-debug.log
+yarn-error.logn

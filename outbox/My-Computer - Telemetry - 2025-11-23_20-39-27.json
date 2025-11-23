@@ -1,0 +1,29 @@
+{
+    "timestamp": 1763910567.280516,
+    "cpu_usage": "15.8%",
+    "memory_usage": "83%",
+    "disk_usage": "94%",
+    "battery_info": {
+        "percentage": "100%",
+        "is_plugged_in": true,
+        "secs_left": "N/A (or charging)"
+    },
+    "network_info": {
+        "ip_address": "169.254.201.213",
+        "data_sent": "217.54 MB",
+        "data_received": "227.18 MB"
+    },
+    "temperature_info": {
+        "cpu": "N/A",
+        "gpu": "40.0\u00b0C"
+    },
+    "location_info": {
+        "precise_gps_attempt": {
+            "type": "API Error",
+            "error": "type object 'PositionAccuracy' has no attribute 'high'",
+            "message": "Windows Location Service may not be available on this system"
+        },
+        "ip_geolocation_attempt": "API request failed",
+        "status": "Both location methods failed"
+    }
+}
