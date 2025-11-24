@@ -43,16 +43,17 @@ def send_alert_to_supabase():
         # Update dashboard button state immediately after emergency is triggered
         try:
             import sys
-            dashboard_module = sys.modules.get('ui.dashboard_ui')
-            if dashboard_module:
-                # Try to get the current dashboard frame instance
-                main_window = sys.modules.get('ui.main_window')
-                if main_window and hasattr(main_window, 'main_app'):
-                    from ui.dashboard_ui import DashboardFrame
-                    if DashboardFrame in main_window.main_app.frames:
-                        dashboard_frame = main_window.main_app.frames[DashboardFrame]
-                        if hasattr(dashboard_frame, 'update_emergency_button_state'):
-                            dashboard_frame.after(100, dashboard_frame.update_emergency_button_state)
+            main_window = sys.modules.get('ui.main_window')
+            if main_window and hasattr(main_window, 'main_app'):
+                from ui.dashboard_ui import DashboardFrame
+                if DashboardFrame in main_window.main_app.frames:
+                    dashboard_frame = main_window.main_app.frames[DashboardFrame]
+                    if hasattr(dashboard_frame, 'update_emergency_button_state'):
+                        # Update immediately and keep checking
+                        dashboard_frame.after(100, dashboard_frame.update_emergency_button_state)
+                        dashboard_frame.after(500, dashboard_frame.update_emergency_button_state)
+                        dashboard_frame.after(1000, dashboard_frame.update_emergency_button_state)
+                        log.info("Dashboard cancel button should now be visible")
         except Exception as update_error:
             log.debug(f"Could not update dashboard button state immediately: {update_error}")
     except Exception as e:

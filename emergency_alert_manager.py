@@ -1591,6 +1591,20 @@ def trigger_emergency_alert(activation_method="button"):
                 from ui.emergency_status_ui import show_emergency_status_window
                 main_window.after(500, lambda: show_emergency_status_window(main_window))
                 log.info("Emergency status window will be shown")
+                
+                # Also update dashboard button state immediately
+                try:
+                    from ui.dashboard_ui import DashboardFrame
+                    if hasattr(main_window, 'frames') and DashboardFrame in main_window.frames:
+                        dashboard = main_window.frames[DashboardFrame]
+                        if hasattr(dashboard, 'update_emergency_button_state'):
+                            # Update immediately and multiple times to ensure it shows
+                            main_window.after(100, dashboard.update_emergency_button_state)
+                            main_window.after(500, dashboard.update_emergency_button_state)
+                            main_window.after(1000, dashboard.update_emergency_button_state)
+                            log.info("Dashboard emergency button state will be updated")
+                except Exception as dashboard_error:
+                    log.warning(f"Could not update dashboard button: {dashboard_error}")
             else:
                 log.warning("Could not find main window to show emergency status window")
         except Exception as status_window_error:

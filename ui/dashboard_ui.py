@@ -43,27 +43,27 @@ class DashboardFrame(tk.Frame):
         )
         self.btn_emergency.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
         
-        # Cancel Emergency Button (shown when emergency is active)
+        # Cancel Emergency Button (shown when emergency is active) - Make it more prominent
         self.btn_cancel_emergency = tk.Button(
             emergency_frame,
-            text="⛔ STOP EMERGENCY MODE ⛔",
+            text="⛔ EMERGENCY STOP - CANCEL MODE ⛔",
             command=self.handle_cancel_emergency,
-            font=("Arial", 16, "bold"),
+            font=("Arial", 18, "bold"),
             bg="#FF6B35",  # Orange-red for cancel
             fg="white",
             activebackground="#E55A2B",
             activeforeground="white",
             relief="raised",
-            bd=3,
-            padx=30,
-            pady=12,
+            bd=4,
+            padx=40,
+            pady=18,
             cursor="hand2",
-            highlightthickness=2,
-            highlightbackground="#CC5500",
-            highlightcolor="#FF8800"
+            highlightthickness=3,
+            highlightbackground="#FFD700",
+            highlightcolor="#FFD700"
         )
         # Initially hidden, shown when emergency is active
-        self.btn_cancel_emergency.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+        self.btn_cancel_emergency.grid(row=1, column=0, padx=5, pady=8, sticky="ew")
         self.btn_cancel_emergency.grid_remove()  # Hide initially
         
         # Add help text below emergency button (in a separate row)
@@ -166,31 +166,56 @@ class DashboardFrame(tk.Frame):
         from emergency_alert_manager import is_emergency_active, stop_emergency_mode
         
         if is_emergency_active():
-            stop_emergency_mode()
-            messagebox.showinfo("Emergency Stopped", "Emergency mode has been stopped.")
-            self.update_emergency_button_state()
+            # Ask for confirmation
+            result = messagebox.askyesno(
+                "Stop Emergency Mode?",
+                "Are you sure you want to stop emergency mode?\n\n"
+                "This will:\n"
+                "• Stop all data collection\n"
+                "• Send final data update\n"
+                "• Restore normal monitoring settings",
+                icon="warning"
+            )
+            
+            if result:
+                stop_emergency_mode()
+                messagebox.showinfo("Emergency Stopped", "Emergency mode has been stopped successfully.")
+                self.update_emergency_button_state()
     
     def update_emergency_button_state(self):
         """Update emergency button visibility based on emergency state"""
         from emergency_alert_manager import is_emergency_active
         
         try:
-            if is_emergency_active():
+            emergency_active = is_emergency_active()
+            log.info(f"Dashboard: Checking emergency state - Active: {emergency_active}")
+            
+            if emergency_active:
                 # Show cancel button, hide emergency button and help text
                 self.btn_emergency.grid_remove()
                 self.help_text.grid_remove()
-                self.btn_cancel_emergency.grid()
-                log.info("Emergency active - showing cancel button")
+                # Make sure cancel button is visible and prominent - FORCE IT TO SHOW
+                self.btn_cancel_emergency.grid(row=1, column=0, padx=5, pady=8, sticky="ew")
+                self.btn_cancel_emergency.lift()
+                self.btn_cancel_emergency.update_idletasks()
+                # Force the frame to update
+                self.update_idletasks()
+                log.info("Emergency active - FORCING cancel button to be visible on dashboard")
             else:
                 # Show emergency button and help text, hide cancel button
-                self.btn_emergency.grid()
-                self.help_text.grid()
+                self.btn_emergency.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+                self.help_text.grid(row=1, column=0, pady=(0, 10))
                 self.btn_cancel_emergency.grid_remove()
                 log.debug("Emergency inactive - showing emergency button")
         except Exception as e:
             log.error(f"Error updating emergency button state: {e}")
             import traceback
             log.error(traceback.format_exc())
+            # On error, try to show cancel button anyway if emergency might be active
+            try:
+                self.btn_cancel_emergency.grid(row=1, column=0, padx=5, pady=8, sticky="ew")
+            except:
+                pass
     
     def check_emergency_state(self):
         """Periodically check emergency state and update button visibility"""
@@ -274,9 +299,20 @@ class DashboardFrame(tk.Frame):
         if not recipient:
             messagebox.showerror("Error", "Please set your Recipient Email in Settings first.")
             return
-        result = self.controller.auth.get_sender_assignment()
+        # Clear cache and get fresh sender assignment
+        # Use use_cache=False to ensure we get the latest sender (especially after fixing is_active check)
+        self.controller.auth.clear_sender_cache()  # Clear any cached failures
+        result = self.controller.auth.get_sender_assignment(use_cache=False)
         if not result.get("success"):
-            messagebox.showerror("Error", f"Could not get sender credentials: {result.get('error')}")
+            error_msg = result.get("error", "Unknown error")
+            log.error(f"Failed to get sender credentials: {error_msg}")
+            messagebox.showerror(
+                "SMTP Configuration Error", 
+                f"Could not get sender credentials:\n{error_msg}\n\n"
+                "Please ensure:\n"
+                "1. At least one sender in sender_pool has is_active = true\n"
+                "2. Or configure SMTP in Settings → SMTP section"
+            )
             return
         if scheduler_thread is None or not scheduler_thread.is_alive():
             scheduler_thread = Scheduler()

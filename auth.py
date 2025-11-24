@@ -229,6 +229,12 @@ class AuthService:
             log.error(f"Password reset exception: {e}")
             return {"success": False, "error": str(e)}
 
+    def clear_sender_cache(self):
+        """Clear the sender assignment cache to force a fresh lookup"""
+        self._sender_cache = None
+        self._sender_cache_time = 0
+        log.debug("Sender cache cleared")
+    
     def get_sender_assignment(self, use_cache=True):
         """Fetch SMTP sender credentials for the current user from sender_pool database table.
 
@@ -243,9 +249,16 @@ class AuthService:
             return {"success": False, "error": "User not logged in"}
 
         # Check cache first (if enabled and not expired)
+        # But if cache contains a failure, always retry to get fresh data
         current_time = time.time()
-        if use_cache and self._sender_cache and (current_time - self._sender_cache_time) < self._sender_cache_ttl:
-            return self._sender_cache
+        if use_cache and self._sender_cache:
+            # If cache is a success, use it if not expired
+            if self._sender_cache.get("success") and (current_time - self._sender_cache_time) < self._sender_cache_ttl:
+                return self._sender_cache
+            # If cache is a failure, clear it and retry (in case sender was just activated)
+            elif not self._sender_cache.get("success"):
+                log.debug("Clearing failed sender cache to retry...")
+                self._sender_cache = None
 
         # Throttle warning messages (only log once per 5 minutes)
         should_log_warning = (current_time - self._last_warning_time) >= self._warning_throttle
@@ -267,20 +280,87 @@ class AuthService:
                 for s in all_senders_res.data:
                     log.debug(f"  - {s.get('smtp_email')}: is_active={s.get('is_active')} (type: {type(s.get('is_active'))})")
             
-            # Query for active senders - handle both boolean true and string "true"/"Active"
-            res = (
-                self.client
-                .from_("sender_pool")
-                .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
-                .eq("is_active", True)
-                .order("assigned_count", desc=False)
-                .limit(1)
-                .execute()
-            )
-
+            # Query for active senders - handle both boolean true and string "true"/"True"
+            # First, get all senders and filter in Python to handle different data types
+            # Try to select is_active, but handle case where column might not exist
+            try:
+                all_senders_query = (
+                    self.client
+                    .from_("sender_pool")
+                    .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
+                    .execute()
+                )
+            except Exception as query_error:
+                # If query fails (e.g., is_active column doesn't exist), try without it
+                error_str = str(query_error)
+                if "is_active" in error_str.lower() or "column" in error_str.lower():
+                    log.warning(f"is_active column may not exist, querying without it: {error_str}")
+                    all_senders_query = (
+                        self.client
+                        .from_("sender_pool")
+                        .select("id, smtp_email, smtp_server, smtp_port, smtp_password, assigned_count, max_users")
+                        .execute()
+                    )
+                else:
+                    raise
+            
+            # Filter for active senders - handle boolean True, string 'true', 'True', NULL, etc.
+            # If is_active is NULL or column doesn't exist, treat as active (backward compatibility)
+            active_senders = []
+            if all_senders_query.data:
+                log.debug(f"Found {len(all_senders_query.data)} total sender(s) in database")
+                for sender in all_senders_query.data:
+                    is_active = sender.get("is_active")
+                    is_active_type = type(is_active).__name__ if is_active is not None else "None"
+                    is_active_str = str(is_active) if is_active is not None else "NULL"
+                    
+                    # Check if sender is active:
+                    # - Boolean True
+                    # - String 'true', 'True', '1', 'yes', 'active' (case-insensitive)
+                    # - NULL/None (treat as active for backward compatibility if column exists but is NULL)
+                    # - If column doesn't exist (is_active key not in dict), treat as active
+                    is_considered_active = False
+                    if "is_active" not in sender:
+                        # Column doesn't exist - treat all senders as active
+                        is_considered_active = True
+                        log.debug(f"  Sender {sender.get('smtp_email')}: is_active column not found -> Active: {is_considered_active} (backward compatibility)")
+                    elif is_active is None:
+                        # Column exists but is NULL - treat as active for backward compatibility
+                        is_considered_active = True
+                        log.debug(f"  Sender {sender.get('smtp_email')}: is_active=NULL -> Active: {is_considered_active} (backward compatibility)")
+                    elif is_active is True:
+                        # Boolean True
+                        is_considered_active = True
+                    elif is_active is False:
+                        # Boolean False
+                        is_considered_active = False
+                    else:
+                        # String or other type - check if it represents "active"
+                        # Strip whitespace and check multiple variations
+                        is_active_clean = str(is_active).strip().lower()
+                        is_considered_active = is_active_clean in ['true', '1', 'yes', 'active', 't', 'enabled', 'on']
+                        log.debug(f"  String check: '{is_active}' -> cleaned: '{is_active_clean}' -> Active: {is_considered_active}")
+                    
+                    log.info(f"  Sender {sender.get('smtp_email')}: is_active={is_active} (type: {is_active_type}, str: '{is_active_str}') -> Active: {is_considered_active}")
+                    if is_considered_active:
+                        active_senders.append(sender)
+                        log.info(f"  ✅ Added {sender.get('smtp_email')} to active senders list")
+                    else:
+                        log.warning(f"  ❌ Sender {sender.get('smtp_email')} is NOT active (is_active={is_active})")
+                
+                log.info(f"Found {len(active_senders)} active sender(s) after filtering (out of {len(all_senders_query.data)} total)")
+            
+            # Sort by assigned_count and get the first one
+            if active_senders:
+                active_senders.sort(key=lambda x: x.get("assigned_count", 0) or 0)
+                res_data = [active_senders[0]]  # First sender with lowest assigned_count
+            else:
+                res_data = []
+            
             # Check if we got any data from the database
-            if res.data and len(res.data) > 0:
-                row = res.data[0]
+            if res_data and len(res_data) > 0:
+                log.info(f"✅ Found active sender in database: {res_data[0].get('smtp_email')}")
+                row = res_data[0]
                 sender_id = row.get("id")
                 
                 if should_log_warning:
@@ -293,20 +373,11 @@ class AuthService:
                 if max_users is not None and assigned_count is not None and assigned_count >= max_users:
                     if should_log_warning:
                         log.warning(f"Sender {row.get('smtp_email')} has reached max_users limit ({assigned_count}/{max_users}). Trying next sender...")
-                    # Try to find another sender
-                    res2 = (
-                        self.client
-                        .from_("sender_pool")
-                        .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
-                        .eq("is_active", True)
-                        .neq("id", sender_id)
-                        .order("assigned_count", desc=False)
-                        .limit(1)
-                        .execute()
-                    )
-                    
-                    if res2.data and len(res2.data) > 0:
-                        row = res2.data[0]
+                    # Try to find another sender from the already filtered active_senders list
+                    alternative_senders = [s for s in active_senders if s.get("id") != sender_id]
+                    if alternative_senders:
+                        alternative_senders.sort(key=lambda x: x.get("assigned_count", 0) or 0)
+                        row = alternative_senders[0]
                         sender_id = row.get("id")
                         if should_log_warning:
                             log.info(f"Using alternative sender: {row.get('smtp_email')} (ID: {sender_id})")
@@ -344,19 +415,34 @@ class AuthService:
             
             # No active sender found in database - try querying without is_active filter to see what we have
             if should_log_warning:
-                log.warning("No active sender found in sender_pool database table. Checking config fallback...")
+                log.error("❌ No active sender found in sender_pool database table. Checking config fallback...")
                 # Debug: Check if there are any senders at all
-                debug_res = (
-                    self.client
-                    .from_("sender_pool")
-                    .select("id, smtp_email, is_active")
-                    .limit(5)
-                    .execute()
-                )
-                if debug_res.data:
-                    log.warning(f"Found {len(debug_res.data)} sender(s) in pool, but none are active:")
-                    for s in debug_res.data:
-                        log.warning(f"  - {s.get('smtp_email')}: is_active={s.get('is_active')} (type: {type(s.get('is_active'))})")
+                try:
+                    debug_res = (
+                        self.client
+                        .from_("sender_pool")
+                        .select("id, smtp_email, is_active")
+                        .limit(5)
+                        .execute()
+                    )
+                    if debug_res.data:
+                        log.error(f"Found {len(debug_res.data)} sender(s) in pool, but none are active:")
+                        for s in debug_res.data:
+                            is_active_val = s.get('is_active')
+                            log.error(f"  - {s.get('smtp_email')}: is_active={is_active_val} (type: {type(is_active_val)}, repr: {repr(is_active_val)})")
+                            # Show what the check would do
+                            if is_active_val is None:
+                                log.error(f"    -> Would be treated as ACTIVE (NULL = active for backward compatibility)")
+                            elif isinstance(is_active_val, bool):
+                                log.error(f"    -> Boolean check: {is_active_val}")
+                            else:
+                                cleaned = str(is_active_val).strip().lower()
+                                would_be_active = cleaned in ['true', '1', 'yes', 'active', 't', 'enabled', 'on']
+                                log.error(f"    -> String check: '{cleaned}' -> Would be active: {would_be_active}")
+                    else:
+                        log.error("❌ sender_pool table is EMPTY - no senders found at all!")
+                except Exception as debug_error:
+                    log.error(f"Error during debug query: {debug_error}")
                 self._last_warning_time = current_time
             
         except Exception as e:

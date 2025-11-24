@@ -47,6 +47,9 @@ class GracePeriodWindow(tk.Toplevel):
         self.lbl_info = ttk.Label(self, text="Sending alert to admin and emergency contacts...", style="Emergency.TLabel")
         self.lbl_info.pack(pady=5)
         
+        # Make window stay on top initially, but allow it to be moved behind after sent
+        self.attributes('-topmost', True)
+        
         # Use tk.Button instead of ttk.Button for better color control
         self.btn_cancel = tk.Button(
             self,
@@ -65,7 +68,8 @@ class GracePeriodWindow(tk.Toplevel):
         )
         self.btn_cancel.pack(pady=20)
         
-        self.protocol("WM_DELETE_WINDOW", self.on_cancel_callback) # Handle "X" button
+        self.alert_sent = False  # Track if alert has been sent
+        self.protocol("WM_DELETE_WINDOW", self.handle_window_close) # Handle "X" button
         
         # Start the countdown
         self.update_countdown()
@@ -77,9 +81,48 @@ class GracePeriodWindow(tk.Toplevel):
             self.after(1000, self.update_countdown) # Run again after 1 second
         else:
             # Time's up! Send the alert.
-            self.lbl_countdown.config(text="SENDING", foreground="orange")
-            self.btn_cancel.config(state="disabled")
-            self.lbl_info.config(text="Alert sent! Emergency mode is now active.\nA status window will appear shortly...")
+            self.alert_sent = True  # Mark that alert has been sent
+            self.lbl_countdown.config(text="✓ SENT", foreground="#00FF00")  # Green color
+            self.btn_cancel.config(state="disabled", text="✕ ALERT SENT - CANNOT CANCEL")
+            self.lbl_info.config(text="✓ Alert sent successfully!\n\nEmergency mode is now ACTIVE.\nData is being collected and sent every 15 seconds.\n\nYou can stop emergency mode from the Dashboard or the status window.\n\nYou can close this window now.")
             self.on_confirm_callback() # Call the send function
-            # Close window after a short delay to show the message
-            self.after(2000, self.destroy) # Close window after 2 seconds
+            
+            # Allow window to be closed after alert is sent
+            self.attributes('-topmost', False)  # Allow window to go behind others
+            
+            # Don't close the window - keep it open to show sent status
+            # Change cancel button to a "Close" button after a delay
+            self.after(3000, self.show_close_button)
+    
+    def show_close_button(self):
+        """Change the cancel button to a close button after alert is sent"""
+        try:
+            from emergency_alert_manager import is_emergency_active
+            if is_emergency_active():
+                # Emergency is active - change button to show how to stop
+                self.btn_cancel.config(
+                    state="normal",
+                    text="✓ Alert Sent - Go to Dashboard to Stop",
+                    command=self.close_window,
+                    bg="#4CAF50",  # Green
+                    fg="white"
+                )
+            else:
+                # Emergency was cancelled somehow - just close
+                self.close_window()
+        except Exception as e:
+            log.error(f"Error updating grace period window: {e}")
+            self.close_window()
+    
+    def handle_window_close(self):
+        """Handle window close attempt - allow closing after alert is sent"""
+        if self.alert_sent:
+            # Alert already sent, allow closing
+            self.destroy()
+        else:
+            # Alert not sent yet, cancel it
+            self.on_cancel_callback()
+    
+    def close_window(self):
+        """Close the grace period window"""
+        self.destroy()

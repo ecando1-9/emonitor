@@ -12,9 +12,10 @@ class EmergencyStatusWindow(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("⚠️ EMERGENCY MODE ACTIVE ⚠️")
-        self.geometry("450x300")
+        self.geometry("700x500")
         self.transient(parent)
-        self.resizable(False, False)
+        self.resizable(True, True)  # Make window resizable
+        self.minsize(600, 400)  # Set minimum size
         
         # Make window always on top
         self.attributes('-topmost', True)
@@ -22,9 +23,9 @@ class EmergencyStatusWindow(tk.Toplevel):
         # Style - Red/Orange background for emergency
         self.configure(bg="#8B0000")
         
-        # Main container
+        # Main container - make it expandable and configure for resizing
         main_frame = tk.Frame(self, bg="#8B0000")
-        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
         # Title
         title_label = tk.Label(
@@ -36,7 +37,7 @@ class EmergencyStatusWindow(tk.Toplevel):
         )
         title_label.pack(pady=(10, 20))
         
-        # Status info
+        # Status info - make it more detailed and expandable
         info_text = """Emergency alert has been triggered and is actively collecting data.
 
 Data is being sent every 15 seconds to:
@@ -44,18 +45,35 @@ Data is being sent every 15 seconds to:
 • Admin email
 • Emergency email
 
-All monitoring features are enabled."""
+All monitoring features are enabled:
+• Screen recording
+• Camera capture
+• Activity monitoring
+• Location tracking
+• Telemetry data"""
+        
+        # Use a frame for info text that can expand
+        info_frame = tk.Frame(main_frame, bg="#8B0000")
+        info_frame.pack(fill="both", expand=True, pady=15, padx=20)
         
         info_label = tk.Label(
-            main_frame,
+            info_frame,
             text=info_text,
-            font=("Arial", 11),
+            font=("Arial", 12),
             bg="#8B0000",
             fg="white",
             justify="left",
-            wraplength=400
+            wraplength=600
         )
-        info_label.pack(pady=10)
+        info_label.pack(anchor="w")
+        
+        # Update wraplength when window is resized
+        def update_wraplength(event=None):
+            if event:
+                new_width = max(400, event.width - 80)  # Account for padding
+                info_label.config(wraplength=new_width)
+        
+        self.bind('<Configure>', update_wraplength)
         
         # Timer label (shows how long emergency has been active)
         self.timer_label = tk.Label(
@@ -67,33 +85,40 @@ All monitoring features are enabled."""
         )
         self.timer_label.pack(pady=10)
         
-        # Cancel button - Large and prominent
+        # Add separator before cancel button
+        separator = tk.Frame(main_frame, bg="#FF6B35", height=2)
+        separator.pack(fill="x", pady=20, padx=20)
+        
+        # Cancel button - Large and very prominent
         cancel_button = tk.Button(
             main_frame,
-            text="⛔ STOP EMERGENCY MODE ⛔",
+            text="⛔ CANCEL / STOP EMERGENCY MODE ⛔",
             command=self.stop_emergency,
-            font=("Arial", 16, "bold"),
+            font=("Arial", 18, "bold"),
             bg="#FF6B35",  # Orange-red
             fg="white",
             activebackground="#E55A2B",
             activeforeground="white",
             relief="raised",
-            bd=4,
-            padx=40,
-            pady=15,
-            cursor="hand2"
+            bd=5,
+            padx=50,
+            pady=20,
+            cursor="hand2",
+            highlightthickness=3,
+            highlightbackground="#FFD700",
+            highlightcolor="#FFD700"
         )
-        cancel_button.pack(pady=20)
+        cancel_button.pack(pady=25, padx=20, fill="x", expand=True)
         
-        # Warning text
+        # Warning text - make it more visible
         warning_label = tk.Label(
             main_frame,
-            text="Click the button above to stop emergency mode",
-            font=("Arial", 10, "italic"),
+            text="⚠️ Click the button above to cancel and stop emergency mode ⚠️",
+            font=("Arial", 12, "bold"),
             bg="#8B0000",
             fg="#FFD700"
         )
-        warning_label.pack(pady=5)
+        warning_label.pack(pady=10)
         
         # Start timer
         self.start_time = time.time()
