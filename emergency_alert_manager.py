@@ -16,6 +16,7 @@ from capture.activity import get_active_window_data
 
 EMERGENCY_EMAIL = "ecando976@gmail.com"
 EMERGENCY_QUEUE_FILE = "emergency_queue.json"
+EMERGENCY_STATE_FILE = "emergency_state.json"
 MAX_RETRIES = 5
 RETRY_DELAYS = [1, 2, 5, 10, 30]  # Exponential backoff in seconds
 
@@ -682,6 +683,7 @@ def stop_emergency_mode():
     - Stops all data collection
     - Restores original feature permissions
     - Releases all capture locks
+    - Updates local file state
     """
     global _emergency_active, _emergency_stop_event, _current_alert_id, _original_features
     log.warning("EMERGENCY: User requested to stop emergency mode")
@@ -693,6 +695,14 @@ def stop_emergency_mode():
     # Set stop event first to stop periodic sending
     _emergency_stop_event.set()
     
+    # Update state file to indicate stopped
+    try:
+        if os.path.exists(EMERGENCY_STATE_FILE):
+            os.remove(EMERGENCY_STATE_FILE)
+            log.info(f"Removed emergency state file: {EMERGENCY_STATE_FILE}")
+    except Exception as e:
+        log.error(f"Failed to remove emergency state file: {e}")
+
     # Send final data update before stopping
     if _current_alert_id and auth_service.current_user:
         try:
@@ -909,8 +919,33 @@ This is an automated emergency update from eMonitor.
     log.info("EMERGENCY: Emergency mode stopped. All data collection stopped and final data sent.")
 
 def is_emergency_active():
-    """Returns True if emergency mode is currently active."""
-    return _emergency_active
+    """Returns True if emergency mode is currently active.
+
+    Checks both process-local state and file-based state (for multi-process coordination).
+    """
+    global _emergency_active
+
+    # Check global variable first
+    if _emergency_active:
+        return True
+
+    # Check state file (if set by another process like desktop shortcut)
+    try:
+        if os.path.exists(EMERGENCY_STATE_FILE):
+            # If file exists and is recent (e.g. within last 30 mins), consider active
+            # For now, just existence is enough, but we could check timestamp
+            with open(EMERGENCY_STATE_FILE, 'r') as f:
+                state = json.load(f)
+                if state.get("active"):
+                    # Sync local state if we didn't know about it
+                    if not _emergency_active:
+                        _emergency_active = True
+                        log.info("Detected active emergency from state file. Syncing local state.")
+                    return True
+    except Exception:
+        pass
+
+    return False
 
 def send_emergency_data_periodically(alert_id, duration_minutes=30):
     """Updates the same alert record and sends data every 30 seconds to admin, user email, and emergency email.
@@ -1653,6 +1688,19 @@ def trigger_emergency_alert(activation_method="button"):
     _emergency_stop_event.clear()
     _current_alert_id = None
     
+    # Write state to file for other processes (e.g. UI) to detect
+    try:
+        state_data = {
+            "active": True,
+            "triggered_at": datetime.now().isoformat(),
+            "method": activation_method
+        }
+        with open(EMERGENCY_STATE_FILE, 'w') as f:
+            json.dump(state_data, f)
+        log.info(f"Wrote emergency state to {EMERGENCY_STATE_FILE}")
+    except Exception as e:
+        log.error(f"Failed to write emergency state file: {e}")
+
     # Enable all features for emergency (regardless of subscription)
     global _original_features
     _original_features = enable_all_features_for_emergency()

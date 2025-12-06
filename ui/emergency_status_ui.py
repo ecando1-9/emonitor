@@ -20,6 +20,22 @@ class EmergencyStatusWindow(tk.Toplevel):
         # Make window always on top
         self.attributes('-topmost', True)
         
+        # Add a Maximize/Restore button frame
+        control_frame = tk.Frame(self, bg="#8B0000")
+        control_frame.pack(fill="x", side="top", anchor="e", padx=5, pady=5)
+
+        self.maximized = False
+        self.btn_maximize = tk.Button(
+            control_frame,
+            text="Maximize [ ]",
+            command=self.toggle_maximize,
+            font=("Arial", 9),
+            bg="#FF6B35",
+            fg="white",
+            relief="raised"
+        )
+        self.btn_maximize.pack(side="right")
+
         # Style - Red/Orange background for emergency
         self.configure(bg="#8B0000")
         
@@ -126,6 +142,19 @@ All monitoring features are enabled:
         
         # Handle window close - don't allow closing without stopping emergency
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def toggle_maximize(self):
+        """Toggle maximize state"""
+        if self.maximized:
+            # Restore
+            self.state('normal')
+            self.btn_maximize.config(text="Maximize [ ]")
+            self.maximized = False
+        else:
+            # Maximize
+            self.state('zoomed')
+            self.btn_maximize.config(text="Restore [-]")
+            self.maximized = True
     
     def update_timer(self):
         """Update the timer showing how long emergency has been active"""

@@ -246,11 +246,18 @@ class DashboardFrame(tk.Frame):
                 self._last_emergency_state = emergency_active
                 log.debug(f"Dashboard: Emergency state changed - Active: {emergency_active}")
                 self.update_emergency_button_state()
+
+                # If emergency just became active and status window is not shown, show it
+                if emergency_active:
+                    from ui.emergency_status_ui import show_emergency_status_window
+                    # We pass self.controller (the main window) as parent
+                    show_emergency_status_window(self.controller)
+
         except Exception as e:
             log.error(f"Error checking emergency state: {e}")
         
-        # Check every 5 seconds instead of 2
-        self.after(5000, self.check_emergency_state)
+        # Check every 2 seconds to be more responsive to desktop shortcut
+        self.after(2000, self.check_emergency_state)
 
     def on_show(self):
         """Called when frame is shown. Updates welcome and plan status."""
