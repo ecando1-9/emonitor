@@ -1,10 +1,130 @@
 """
 Desktop shortcut management for emergency mode.
 Creates/removes Windows desktop shortcut for emergency alert.
+Supports custom icons through upload or predefined selections.
 """
 import os
 import sys
+import traceback
 from logger_setup import log
+
+def get_predefined_icons():
+    """
+    Returns a dictionary of predefined icon options.
+    These map to Windows system icons or custom generated icons.
+    """
+    return {
+        "Emergency Red Alert": {
+            "description": "Bright red circle with exclamation mark",
+            "type": "generated",
+            "generator": "create_emergency_icon"
+        },
+        "Warning Yellow": {
+            "description": "Yellow warning icon",
+            "type": "system",
+            "path": "%SystemRoot%\\System32\\shell32.dll,28"  # Yellow warning
+        },
+        "Alert Blue": {
+            "description": "Blue alert icon",
+            "type": "system",
+            "path": "%SystemRoot%\\System32\\shell32.dll,238"  # Blue alert
+        },
+        "Stop Sign Red": {
+            "description": "Stop sign (red circle with stop symbol)",
+            "type": "system",
+            "path": "%SystemRoot%\\System32\\shell32.dll,302"  # Stop icon
+        },
+        "Windows Default": {
+            "description": "Windows default application icon",
+            "type": "system",
+            "path": "%SystemRoot%\\System32\\shell32.dll,1"  # Default app icon
+        }
+    }
+
+def validate_icon_file(file_path):
+    """
+    Validates that a file is a valid icon file.
+    Supports .ico, .png, .jpg formats.
+    
+    Args:
+        file_path: Path to the icon file
+    
+    Returns:
+        Tuple (is_valid, error_message)
+    """
+    if not file_path or not os.path.exists(file_path):
+        return False, "File does not exist"
+    
+    if not os.path.isfile(file_path):
+        return False, "Path is not a file"
+    
+    # Check file size (max 10 MB)
+    file_size = os.path.getsize(file_path)
+    if file_size == 0:
+        return False, "File is empty"
+    if file_size > 10 * 1024 * 1024:
+        return False, "File is too large (max 10 MB)"
+    
+    # Check file extension
+    valid_extensions = {'.ico', '.png', '.jpg', '.jpeg', '.bmp', '.gif'}
+    _, ext = os.path.splitext(file_path.lower())
+    if ext not in valid_extensions:
+        return False, f"Invalid file type. Supported: {', '.join(valid_extensions)}"
+    
+    # Try to open and validate the image
+    try:
+        from PIL import Image
+        img = Image.open(file_path)
+        img.verify()
+        
+        # Check minimum dimensions
+        if img.width < 16 or img.height < 16:
+            return False, "Image must be at least 16x16 pixels"
+        
+        # Check maximum dimensions (reasonable for icons)
+        if img.width > 4096 or img.height > 4096:
+            return False, "Image is too large (max 4096x4096)"
+        
+        log.info(f"Icon validation passed: {file_path} ({img.width}x{img.height})")
+        return True, None
+    except ImportError:
+        log.warning("PIL not available for icon validation, allowing file anyway")
+        return True, None
+    except Exception:
+        log.debug(traceback.format_exc())
+        return False, "Invalid image file"
+
+def copy_icon_to_app_directory(icon_path, custom_name="emergency_alert_custom"):
+    """
+    Copies a custom icon to the application directory.
+    
+    Args:
+        icon_path: Path to the icon file
+        custom_name: Base name for the copied icon
+    
+    Returns:
+        Path to the copied icon in app directory, or None if failed
+    """
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        _, ext = os.path.splitext(icon_path)
+        dest_path = os.path.join(script_dir, f"{custom_name}{ext}")
+        
+        # Copy the file
+        import shutil
+        shutil.copy2(icon_path, dest_path)
+        
+        if os.path.exists(dest_path):
+            log.info("Icon copied to app directory")
+            return dest_path
+        else:
+            log.error("Failed to copy icon to app directory")
+            log.debug(f"Destination path: {dest_path}")
+            return None
+    except Exception:
+        log.error("Failed to copy icon file")
+        log.debug(traceback.format_exc())
+        return None
 
 def create_emergency_icon():
     """Creates an emergency icon file (red circle with exclamation) for the shortcut."""
@@ -114,7 +234,8 @@ def create_emergency_icon():
                 log.warning("Icon file was not created")
                 return None
         except Exception as ico_error:
-            log.warning(f"Failed to save as ICO: {ico_error}. Trying PNG fallback...")
+            log.warning("Failed to save as ICO, trying PNG fallback")
+            log.debug(f"ICO save error: {ico_error}")
             # Fallback: Save as PNG (Windows can use PNG for icons too)
             png_path = icon_path.replace('.ico', '.png')
             try:
@@ -123,15 +244,15 @@ def create_emergency_icon():
                     log.info(f"Created emergency icon as PNG: {png_path}")
                     return png_path
             except Exception as png_error:
-                log.warning(f"Failed to save as PNG: {png_error}")
+                log.warning("Failed to save as PNG")
+                log.debug(f"PNG save error: {png_error}")
                 return None
         
     except ImportError:
         log.warning("PIL/Pillow not available. Icon creation requires Pillow: pip install Pillow")
         return None
-    except Exception as e:
-        log.error(f"Failed to create custom icon: {e}")
-        import traceback
+    except Exception:
+        log.error("Failed to create custom icon")
         log.debug(traceback.format_exc())
         return None
 
@@ -147,12 +268,22 @@ def get_desktop_path():
         winreg.CloseKey(key)
         return desktop
     except Exception as e:
-        log.error(f"Failed to get desktop path: {e}")
+        log.error("Failed to get desktop path")
+        log.debug(traceback.format_exc())
         # Fallback to user's Desktop folder
         return os.path.join(os.path.expanduser("~"), "Desktop")
 
-def create_emergency_shortcut():
-    """Creates a desktop shortcut for emergency alert."""
+def create_emergency_shortcut(custom_icon_path=None, icon_type="generated"):
+    """
+    Creates a desktop shortcut for emergency alert.
+    
+    Args:
+        custom_icon_path: Optional path to a custom icon file
+        icon_type: Type of icon - "generated", "predefined", or "custom"
+    
+    Returns:
+        True if successful, False otherwise
+    """
     try:
         import win32com.client
     except ImportError:
@@ -180,19 +311,34 @@ def create_emergency_shortcut():
             target_file = bat_file
             log.info("Using batch file for emergency alert")
         else:
-            log.error(f"Emergency alert script not found. Checked: {vbs_file}, {bat_file}")
+            log.error("Emergency alert script not found")
+            log.debug(f"Checked paths for alert script: {vbs_file}, {bat_file}")
             return False
         
         if not os.path.exists(trigger_script):
-            log.warning(f"trigger_emergency.py not found: {trigger_script}")
+            log.warning("trigger_emergency.py not found in application directory")
+            log.debug(f"Checked trigger script path: {trigger_script}")
             # Continue anyway - the batch/vbs will handle the error
         
-        # Try to create/use emergency icon
-        icon_path = create_emergency_icon()
+        # Determine icon path
+        icon_path = None
+        
+        if icon_type == "custom" and custom_icon_path:
+            # Validate custom icon
+            is_valid, error_msg = validate_icon_file(custom_icon_path)
+            if is_valid:
+                # Copy icon to app directory
+                icon_path = copy_icon_to_app_directory(custom_icon_path, "emergency_alert_custom")
+            else:
+                log.warning(f"Custom icon validation failed: {error_msg}. Using default.")
+        
+        if not icon_path:
+            # Try to create/use emergency icon
+            icon_path = create_emergency_icon()
+        
         if not icon_path or not os.path.exists(icon_path):
             log.warning("Custom icon not available, using Windows default alert icon")
             # Fallback to Windows system icon (shell32.dll icon index 238 is a warning/alert icon)
-            # Also try index 27 (exclamation mark) or 241 (warning sign)
             icon_path = "%SystemRoot%\\System32\\shell32.dll,238"
         else:
             # Make sure the path is absolute for the shortcut
@@ -219,10 +365,12 @@ def create_emergency_shortcut():
         
         log.info(f"Created emergency alert desktop shortcut: {shortcut_path}")
         return True
-    except Exception as e:
-        log.error(f"Failed to create desktop shortcut: {e}")
+    except Exception:
+        log.error("Failed to create desktop shortcut")
+        log.debug(traceback.format_exc())
         return False
 
+# removed empty duplicate `create_emergency_shortcut` definition (was causing syntax error)
 def remove_emergency_shortcut():
     """Removes the desktop shortcut for emergency alert."""
     try:
@@ -237,7 +385,8 @@ def remove_emergency_shortcut():
             log.info("Emergency alert shortcut not found (already removed)")
             return True
     except Exception as e:
-        log.error(f"Failed to remove desktop shortcut: {e}")
+        log.error("Failed to remove desktop shortcut")
+        log.debug(traceback.format_exc())
         return False
 
 def check_shortcut_exists():
@@ -247,6 +396,7 @@ def check_shortcut_exists():
         shortcut_path = os.path.join(desktop_path, "Emergency Alert.lnk")
         return os.path.exists(shortcut_path)
     except Exception as e:
-        log.error(f"Failed to check shortcut existence: {e}")
+        log.error("Failed to check shortcut existence")
+        log.debug(traceback.format_exc())
         return False
 

@@ -40,6 +40,18 @@ def send_alert_to_supabase():
         from emergency_alert_manager import trigger_emergency_alert
         trigger_emergency_alert("hotkey_or_button")
         
+        # Show the emergency status window (persistent window with cancel button)
+        try:
+            import sys
+            from ui.emergency_status_ui import show_emergency_status_window
+            main_window = sys.modules.get('ui.main_window')
+            if main_window and hasattr(main_window, 'main_app'):
+                root = main_window.main_app.winfo_toplevel()
+                show_emergency_status_window(root)
+                log.info("Emergency status window displayed")
+        except Exception as window_error:
+            log.warning(f"Could not show emergency status window: {window_error}")
+        
         # Update dashboard button state immediately after emergency is triggered
         try:
             import sys
@@ -57,7 +69,8 @@ def send_alert_to_supabase():
         except Exception as update_error:
             log.debug(f"Could not update dashboard button state immediately: {update_error}")
     except Exception as e:
-        log.error(f"Failed to send emergency alert via email: {e}")
+        log.error("Failed to send emergency alert via email")
+        log.debug(f"Emergency alert error: {e}")
     
     # Also try Supabase if available
     try:

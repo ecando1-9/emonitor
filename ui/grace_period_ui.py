@@ -44,7 +44,7 @@ class GracePeriodWindow(tk.Toplevel):
         self.lbl_countdown = ttk.Label(self, text=str(self.countdown), style="Countdown.TLabel")
         self.lbl_countdown.pack(pady=10)
         
-        self.lbl_info = ttk.Label(self, text="Sending alert to admin and emergency contacts...", style="Emergency.TLabel")
+        self.lbl_info = ttk.Label(self, text="Grace period countdown...\nClick CANCEL to stop the alert.", style="Emergency.TLabel")
         self.lbl_info.pack(pady=5)
         
         # Make window stay on top initially, but allow it to be moved behind after sent
@@ -83,36 +83,32 @@ class GracePeriodWindow(tk.Toplevel):
             # Time's up! Send the alert.
             self.alert_sent = True  # Mark that alert has been sent
             self.lbl_countdown.config(text="✓ SENT", foreground="#00FF00")  # Green color
+            self.lbl_info.config(text="✓ Alert sent successfully!\n\nEmergency mode is now ACTIVE.\nData is being collected and sent every 30 seconds.\n\nYou can stop emergency mode from the Dashboard.")
             self.btn_cancel.config(state="disabled", text="✕ ALERT SENT - CANNOT CANCEL")
-            self.lbl_info.config(text="✓ Alert sent successfully!\n\nEmergency mode is now ACTIVE.\nData is being collected and sent every 15 seconds.\n\nYou can stop emergency mode from the Dashboard or the status window.\n\nYou can close this window now.")
             self.on_confirm_callback() # Call the send function
             
             # Allow window to be closed after alert is sent
             self.attributes('-topmost', False)  # Allow window to go behind others
             
-            # Don't close the window - keep it open to show sent status
-            # Change cancel button to a "Close" button after a delay
-            self.after(3000, self.show_close_button)
+            # Change cancel button to a "Close" button after a short delay
+            self.after(2000, self.show_close_button)
     
     def show_close_button(self):
         """Change the cancel button to a close button after alert is sent"""
         try:
-            from emergency_alert_manager import is_emergency_active
-            if is_emergency_active():
-                # Emergency is active - change button to show how to stop
+            if self.alert_sent:
+                # Alert was sent - change button to allow closing
                 self.btn_cancel.config(
                     state="normal",
-                    text="✓ Alert Sent - Go to Dashboard to Stop",
+                    text="✓ CLOSE WINDOW",
                     command=self.close_window,
                     bg="#4CAF50",  # Green
+                    activebackground="#45a049",
                     fg="white"
                 )
-            else:
-                # Emergency was cancelled somehow - just close
-                self.close_window()
         except Exception as e:
-            log.error(f"Error updating grace period window: {e}")
-            self.close_window()
+            log.error("Error updating grace period window")
+            log.debug(f"Grace period window error: {e}")
     
     def handle_window_close(self):
         """Handle window close attempt - allow closing after alert is sent"""

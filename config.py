@@ -61,7 +61,19 @@ class ConfigManager:
                 "enabled": False,
                 "data_sharing_consent": False,
                 "user_phone": "",
-                "emergency_contacts": []
+                "user_name": "",
+                "emergency_email": "",
+                "emergency_contacts": [],
+                "data_sharing_preferences": {
+                    "screenshot": False,
+                    "device_info": False,
+                    "last_location": False,
+                    "activity_summary": False,
+                    "logs": False,
+                    "camera": False,
+                    "microphone": False,
+                    "screen_record": False
+                }
             },
             "reporting": {
                 "bundle_interval": 60,

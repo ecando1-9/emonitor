@@ -11,7 +11,7 @@ class EmergencyStatusWindow(tk.Toplevel):
     """
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("⚠️ EMERGENCY MODE ACTIVE ⚠️")
+        self.title("*** EMERGENCY MODE ACTIVE ***")
         self.geometry("700x500")
         self.transient(parent)
         self.resizable(True, True)  # Make window resizable
@@ -30,7 +30,7 @@ class EmergencyStatusWindow(tk.Toplevel):
         # Title
         title_label = tk.Label(
             main_frame,
-            text="⚠️ EMERGENCY MODE ACTIVE ⚠️",
+            text="*** EMERGENCY MODE ACTIVE ***",
             font=("Arial", 18, "bold"),
             bg="#8B0000",
             fg="white"
@@ -92,7 +92,7 @@ All monitoring features are enabled:
         # Cancel button - Large and very prominent
         cancel_button = tk.Button(
             main_frame,
-            text="⛔ CANCEL / STOP EMERGENCY MODE ⛔",
+            text="[STOP] CANCEL / STOP EMERGENCY MODE [STOP]",
             command=self.stop_emergency,
             font=("Arial", 18, "bold"),
             bg="#FF6B35",  # Orange-red
@@ -113,7 +113,7 @@ All monitoring features are enabled:
         # Warning text - make it more visible
         warning_label = tk.Label(
             main_frame,
-            text="⚠️ Click the button above to cancel and stop emergency mode ⚠️",
+            text="!!! Click the button above to cancel and stop emergency mode !!!",
             font=("Arial", 12, "bold"),
             bg="#8B0000",
             fg="#FFD700"

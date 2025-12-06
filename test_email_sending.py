@@ -1,4 +1,8 @@
-"""
+python - <<'PY'
+import os
+print("SUPABASE_URL =", os.getenv("SUPABASE_URL"))
+print("SUPABASE_ANON_KEY is set =", bool(os.getenv("SUPABASE_ANON_KEY")))
+PY"""
 Test script to diagnose email sending issues.
 Run this script to check SMTP configuration and test email sending.
 """

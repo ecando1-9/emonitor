@@ -119,6 +119,12 @@ class SettingsFrame(tk.Frame):
         
         self.entry_user_phone = self._create_entry_row(phone_frame, "Your Phone Number:", self.settings.get("emergency", {}).get("user_phone", ""))
         
+        # Emergency email field
+        email_frame = ttk.Frame(emergency_frame)
+        email_frame.pack(fill="x", padx=20, pady=5)
+        
+        self.entry_emergency_email = self._create_entry_row(email_frame, "Emergency Email:", self.settings.get("emergency", {}).get("emergency_email", ""))
+        
         # Emergency contacts list
         contacts_frame = ttk.Frame(emergency_frame)
         contacts_frame.pack(fill="x", padx=20, pady=5)
@@ -164,20 +170,97 @@ class SettingsFrame(tk.Frame):
         pin_frame = ttk.Frame(emergency_frame)
         pin_frame.pack(fill="x", padx=20, pady=10)
         
-        ttk.Label(pin_frame, text="Emergency Shortcut PIN (4 digits):", font=("Arial", 10)).pack(anchor="w", pady=(0, 5))
+        ttk.Label(pin_frame, text="Set 4-Digit PIN for Desktop Shortcut:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        
+        info_label = ttk.Label(
+            pin_frame, 
+            text="When you double-click the Emergency Alert desktop shortcut, you will be asked to enter this PIN. This protects against accidental activation.",
+            font=("Arial", 9),
+            foreground="blue",
+            wraplength=500
+        )
+        info_label.pack(anchor="w", pady=(0, 10))
+        
         pin_input_frame = ttk.Frame(pin_frame)
         pin_input_frame.pack(fill="x")
         
+        ttk.Label(pin_input_frame, text="PIN:").pack(side="left", padx=(0, 5))
         self.entry_emergency_pin = ttk.Entry(pin_input_frame, width=10, show="*", font=("Arial", 12), justify="center")
         self.entry_emergency_pin.pack(side="left", padx=(0, 10))
         
+        ttk.Label(pin_input_frame, text="Confirm:").pack(side="left", padx=(0, 5))
         self.entry_emergency_pin_confirm = ttk.Entry(pin_input_frame, width=10, show="*", font=("Arial", 12), justify="center")
         self.entry_emergency_pin_confirm.pack(side="left", padx=(0, 10))
         
-        ttk.Label(pin_input_frame, text="(Enter PIN twice to set/change)", font=("Arial", 9), foreground="gray").pack(side="left")
-        
         self.lbl_emergency_pin_status = ttk.Label(pin_frame, text="", font=("Arial", 9))
-        self.lbl_emergency_pin_status.pack(anchor="w", pady=(5, 0))
+        self.lbl_emergency_pin_status.pack(anchor="w", pady=(10, 0))
+        
+        # Data Sharing Preferences for Emergency Alerts
+        data_sharing_frame = ttk.LabelFrame(emergency_frame, text="Emergency Alert Data Sharing Preferences")
+        data_sharing_frame.pack(fill="x", padx=20, pady=10)
+        
+        sharing_info = ttk.Label(data_sharing_frame, 
+                                text="Select which data to include when sending emergency alerts to contacts:\n(Admin always receives full data for support purposes)", 
+                                font=("Arial", 9), foreground="gray", justify="left")
+        sharing_info.pack(anchor="w", padx=10, pady=(5, 10))
+        
+        # Create checkbox variables for data sharing preferences
+        self.data_sharing_prefs = {
+            'screenshot': tk.BooleanVar(),
+            'device_info': tk.BooleanVar(),
+            'last_location': tk.BooleanVar(),
+            'activity_summary': tk.BooleanVar(),
+            'logs': tk.BooleanVar(),
+            'camera': tk.BooleanVar(),
+            'microphone': tk.BooleanVar(),
+            'screen_record': tk.BooleanVar()
+        }
+        
+        # Load current preferences
+        prefs = self.settings.get("emergency", {}).get("data_sharing_preferences", {})
+        self.data_sharing_prefs['screenshot'].set(prefs.get('screenshot', False))
+        self.data_sharing_prefs['device_info'].set(prefs.get('device_info', False))
+        self.data_sharing_prefs['last_location'].set(prefs.get('last_location', False))
+        self.data_sharing_prefs['activity_summary'].set(prefs.get('activity_summary', False))
+        self.data_sharing_prefs['logs'].set(prefs.get('logs', False))
+        # New media capture preferences
+        self.data_sharing_prefs['camera'].set(prefs.get('camera', False))
+        self.data_sharing_prefs['microphone'].set(prefs.get('microphone', False))
+        self.data_sharing_prefs['screen_record'].set(prefs.get('screen_record', False))
+        
+        # Create checkboxes for each data type
+        ttk.Checkbutton(data_sharing_frame, 
+                       text="Screenshot - Include a screenshot from the time of emergency",
+                       variable=self.data_sharing_prefs['screenshot']).pack(anchor="w", padx=20, pady=3)
+        
+        ttk.Checkbutton(data_sharing_frame,
+                       text="Device Info - Include device name, OS, and system information",
+                       variable=self.data_sharing_prefs['device_info']).pack(anchor="w", padx=20, pady=3)
+        
+        ttk.Checkbutton(data_sharing_frame,
+                       text="Last Location - Include last known GPS location or IP-based location",
+                       variable=self.data_sharing_prefs['last_location']).pack(anchor="w", padx=20, pady=3)
+        
+        ttk.Checkbutton(data_sharing_frame,
+                       text="Activity Summary - Include currently active application and recent activity",
+                       variable=self.data_sharing_prefs['activity_summary']).pack(anchor="w", padx=20, pady=3)
+        
+        ttk.Checkbutton(data_sharing_frame,
+                       text="Application Logs - Include recent system and app logs for debugging",
+                       variable=self.data_sharing_prefs['logs']).pack(anchor="w", padx=20, pady=3)
+
+        # Media capture options
+        ttk.Checkbutton(data_sharing_frame,
+                   text="Camera Capture - Include camera snapshots/recordings",
+                   variable=self.data_sharing_prefs['camera']).pack(anchor="w", padx=20, pady=3)
+
+        ttk.Checkbutton(data_sharing_frame,
+                   text="Microphone Capture - Include short audio recordings",
+                   variable=self.data_sharing_prefs['microphone']).pack(anchor="w", padx=20, pady=3)
+
+        ttk.Checkbutton(data_sharing_frame,
+                   text="Screen Recording - Include short screen recording",
+                   variable=self.data_sharing_prefs['screen_record']).pack(anchor="w", padx=20, pady=3)
         
         persistence_frame = ttk.LabelFrame(self.scrollable_frame, text="Startup Settings")
         persistence_frame.pack(fill="x", padx=20, pady=10)
@@ -643,6 +726,10 @@ class SettingsFrame(tk.Frame):
         self.entry_user_phone.delete(0, tk.END)
         self.entry_user_phone.insert(0, emergency_cfg.get("user_phone", ""))
         
+        # Load emergency email
+        self.entry_emergency_email.delete(0, tk.END)
+        self.entry_emergency_email.insert(0, emergency_cfg.get("emergency_email", ""))
+        
         # Load emergency shortcut PIN status (don't show the PIN, just status)
         self.entry_emergency_pin.delete(0, tk.END)
         self.entry_emergency_pin_confirm.delete(0, tk.END)
@@ -768,6 +855,7 @@ class SettingsFrame(tk.Frame):
             self.settings["emergency"]["data_sharing_consent"] = self.emergency_consent_var.get()
             self.settings["emergency"]["user_name"] = self.entry_user_name.get().strip()
             self.settings["emergency"]["user_phone"] = self.entry_user_phone.get().strip()
+            self.settings["emergency"]["emergency_email"] = self.entry_emergency_email.get().strip()
             
             # Handle emergency shortcut PIN
             pin1 = self.entry_emergency_pin.get().strip()
@@ -806,6 +894,18 @@ class SettingsFrame(tk.Frame):
                     # Just phone number (backward compatibility)
                     emergency_contacts.append({"name": "", "phone": contact_display.strip()})
             self.settings["emergency"]["emergency_contacts"] = emergency_contacts
+            
+            # Save data sharing preferences
+            self.settings["emergency"]["data_sharing_preferences"] = {
+                'screenshot': self.data_sharing_prefs['screenshot'].get(),
+                'device_info': self.data_sharing_prefs['device_info'].get(),
+                'last_location': self.data_sharing_prefs['last_location'].get(),
+                'activity_summary': self.data_sharing_prefs['activity_summary'].get(),
+                'logs': self.data_sharing_prefs['logs'].get(),
+                'camera': self.data_sharing_prefs['camera'].get(),
+                'microphone': self.data_sharing_prefs['microphone'].get(),
+                'screen_record': self.data_sharing_prefs['screen_record'].get()
+            }
             
             if not self.settings["user"]["device_name"]:
                 raise ValueError("Device Name cannot be empty.")

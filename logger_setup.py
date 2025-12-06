@@ -1,6 +1,7 @@
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
+import io
 
 def setup_logging():
     """Configures the application's logger."""
@@ -16,7 +17,8 @@ def setup_logging():
     file_handler = RotatingFileHandler(
         'emoniter.log', 
         maxBytes=2*1024*1024, 
-        backupCount=3
+        backupCount=3,
+        encoding='utf-8'
     )
     file_handler.setLevel(logging.INFO)
     file_formatter = logging.Formatter(
@@ -25,8 +27,16 @@ def setup_logging():
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
 
-    # Console Handler
-    console_handler = logging.StreamHandler(sys.stdout)
+    # Console Handler with UTF-8 encoding for Windows compatibility
+    # This fixes the UnicodeEncodeError when logging emojis on Windows
+    if sys.platform == 'win32':
+        # Use UTF-8 wrapper for Windows console
+        console_handler = logging.StreamHandler(
+            io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        )
+    else:
+        console_handler = logging.StreamHandler(sys.stdout)
+    
     console_handler.setLevel(logging.INFO)
     console_formatter = logging.Formatter('%(levelname)s: %(message)s')
     console_handler.setFormatter(console_formatter)

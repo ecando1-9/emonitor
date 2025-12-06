@@ -267,94 +267,45 @@ class AuthService:
             # Query sender_pool table from database - get active senders ordered by assigned_count
             log.debug("Querying sender_pool table from database...")
             
-            # First, try to get all senders to debug
-            all_senders_res = (
-                self.client
-                .from_("sender_pool")
-                .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
-                .execute()
-            )
-            
-            if all_senders_res.data:
-                log.debug(f"Found {len(all_senders_res.data)} total senders in pool")
-                for s in all_senders_res.data:
-                    log.debug(f"  - {s.get('smtp_email')}: is_active={s.get('is_active')} (type: {type(s.get('is_active'))})")
-            
-            # Query for active senders - handle both boolean true and string "true"/"True"
-            # First, get all senders and filter in Python to handle different data types
-            # Try to select is_active, but handle case where column might not exist
+            # Query for active senders using WHERE clause (is_active = true)
+            # This is much simpler and faster than filtering in Python
             try:
-                all_senders_query = (
+                active_senders_query = (
                     self.client
                     .from_("sender_pool")
                     .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
+                    .eq("is_active", True)  # Only get senders where is_active = true
+                    .order("assigned_count", desc=False)  # Sort by lowest assigned_count
                     .execute()
                 )
-            except Exception as query_error:
-                # If query fails (e.g., is_active column doesn't exist), try without it
-                error_str = str(query_error)
-                if "is_active" in error_str.lower() or "column" in error_str.lower():
-                    log.warning(f"is_active column may not exist, querying without it: {error_str}")
-                    all_senders_query = (
-                        self.client
-                        .from_("sender_pool")
-                        .select("id, smtp_email, smtp_server, smtp_port, smtp_password, assigned_count, max_users")
-                        .execute()
-                    )
-                else:
-                    raise
-            
-            # Filter for active senders - handle boolean True, string 'true', 'True', NULL, etc.
-            # If is_active is NULL or column doesn't exist, treat as active (backward compatibility)
-            active_senders = []
-            if all_senders_query.data:
-                log.debug(f"Found {len(all_senders_query.data)} total sender(s) in database")
-                for sender in all_senders_query.data:
-                    is_active = sender.get("is_active")
-                    is_active_type = type(is_active).__name__ if is_active is not None else "None"
-                    is_active_str = str(is_active) if is_active is not None else "NULL"
-                    
-                    # Check if sender is active:
-                    # - Boolean True
-                    # - String 'true', 'True', '1', 'yes', 'active' (case-insensitive)
-                    # - NULL/None (treat as active for backward compatibility if column exists but is NULL)
-                    # - If column doesn't exist (is_active key not in dict), treat as active
-                    is_considered_active = False
-                    if "is_active" not in sender:
-                        # Column doesn't exist - treat all senders as active
-                        is_considered_active = True
-                        log.debug(f"  Sender {sender.get('smtp_email')}: is_active column not found -> Active: {is_considered_active} (backward compatibility)")
-                    elif is_active is None:
-                        # Column exists but is NULL - treat as active for backward compatibility
-                        is_considered_active = True
-                        log.debug(f"  Sender {sender.get('smtp_email')}: is_active=NULL -> Active: {is_considered_active} (backward compatibility)")
-                    elif is_active is True:
-                        # Boolean True
-                        is_considered_active = True
-                    elif is_active is False:
-                        # Boolean False
-                        is_considered_active = False
-                    else:
-                        # String or other type - check if it represents "active"
-                        # Strip whitespace and check multiple variations
-                        is_active_clean = str(is_active).strip().lower()
-                        is_considered_active = is_active_clean in ['true', '1', 'yes', 'active', 't', 'enabled', 'on']
-                        log.debug(f"  String check: '{is_active}' -> cleaned: '{is_active_clean}' -> Active: {is_considered_active}")
-                    
-                    log.info(f"  Sender {sender.get('smtp_email')}: is_active={is_active} (type: {is_active_type}, str: '{is_active_str}') -> Active: {is_considered_active}")
-                    if is_considered_active:
-                        active_senders.append(sender)
-                        log.info(f"  ✅ Added {sender.get('smtp_email')} to active senders list")
-                    else:
-                        log.warning(f"  ❌ Sender {sender.get('smtp_email')} is NOT active (is_active={is_active})")
+                res_data = active_senders_query.data if active_senders_query.data else []
                 
-                log.info(f"Found {len(active_senders)} active sender(s) after filtering (out of {len(all_senders_query.data)} total)")
+                if res_data:
+                    log.info(f"✅ Found {len(res_data)} active sender(s) in database")
+                    for sender in res_data:
+                        log.info(f"  - {sender.get('smtp_email')}: assigned_count={sender.get('assigned_count')}, max_users={sender.get('max_users')}")
+                else:
+                    log.error("❌ No active sender found in sender_pool database table (is_active = true)")
+                    # Debug: Check if there are ANY senders at all
+                    try:
+                        all_senders = (
+                            self.client
+                            .from_("sender_pool")
+                            .select("id, smtp_email, is_active")
+                            .limit(10)
+                            .execute()
+                        )
+                        if all_senders.data:
+                            log.error(f"Found {len(all_senders.data)} sender(s) in pool, but NONE have is_active=true:")
+                            for s in all_senders.data:
+                                log.error(f"  - {s.get('smtp_email')}: is_active={s.get('is_active')}")
+                        else:
+                            log.error("❌ sender_pool table is EMPTY - no senders found at all!")
+                    except Exception as debug_error:
+                        log.error(f"Error during debug query: {debug_error}")
             
-            # Sort by assigned_count and get the first one
-            if active_senders:
-                active_senders.sort(key=lambda x: x.get("assigned_count", 0) or 0)
-                res_data = [active_senders[0]]  # First sender with lowest assigned_count
-            else:
+            except Exception as e:
+                log.error(f"Error querying active senders: {e}")
                 res_data = []
             
             # Check if we got any data from the database
@@ -373,17 +324,29 @@ class AuthService:
                 if max_users is not None and assigned_count is not None and assigned_count >= max_users:
                     if should_log_warning:
                         log.warning(f"Sender {row.get('smtp_email')} has reached max_users limit ({assigned_count}/{max_users}). Trying next sender...")
-                    # Try to find another sender from the already filtered active_senders list
-                    alternative_senders = [s for s in active_senders if s.get("id") != sender_id]
-                    if alternative_senders:
-                        alternative_senders.sort(key=lambda x: x.get("assigned_count", 0) or 0)
-                        row = alternative_senders[0]
-                        sender_id = row.get("id")
-                        if should_log_warning:
-                            log.info(f"Using alternative sender: {row.get('smtp_email')} (ID: {sender_id})")
-                    else:
-                        if should_log_warning:
-                            log.warning("No alternative active sender found. Falling back to config SMTP.")
+                    # Try to find another sender - query for next best alternative
+                    try:
+                        alternative_query = (
+                            self.client
+                            .from_("sender_pool")
+                            .select("id, smtp_email, smtp_server, smtp_port, smtp_password, is_active, assigned_count, max_users")
+                            .eq("is_active", True)
+                            .neq("id", sender_id)  # Exclude current sender
+                            .order("assigned_count", desc=False)
+                            .limit(1)
+                            .execute()
+                        )
+                        if alternative_query.data:
+                            row = alternative_query.data[0]
+                            sender_id = row.get("id")
+                            if should_log_warning:
+                                log.info(f"Using alternative sender: {row.get('smtp_email')} (ID: {sender_id})")
+                        else:
+                            if should_log_warning:
+                                log.warning("No alternative active sender found. Falling back to config SMTP.")
+                            row = None
+                    except Exception as alt_error:
+                        log.error(f"Error querying alternative senders: {alt_error}")
                         row = None
                 
                 if row:

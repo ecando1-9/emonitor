@@ -19,13 +19,22 @@ class DashboardFrame(tk.Frame):
         
         # Emergency Button Container Frame for better styling
         emergency_frame = tk.Frame(self, bg="#f0f0f0", relief="ridge", bd=2)
-        emergency_frame.grid(row=0, column=0, pady=(20, 5), padx=20, sticky="ew")
+        emergency_frame.pack(fill="x", padx=20, pady=(20, 5))
         emergency_frame.grid_columnconfigure(0, weight=1)
+        
+        # Status label (shows if emergency is ON or OFF)
+        self.lbl_emergency_status = ttk.Label(
+            emergency_frame,
+            text="Emergency Mode: OFF",
+            font=("Arial", 10, "bold"),
+            foreground="green"
+        )
+        self.lbl_emergency_status.pack(anchor="w", padx=10, pady=(5, 0))
         
         # Emergency Button - Enhanced styling for better visibility
         self.btn_emergency = tk.Button(
             emergency_frame, 
-            text="🚨 EMERGENCY ALERT 🚨",
+            text="🚨 TURN ON EMERGENCY 🚨",
             command=self.handle_emergency_press,
             font=("Arial", 20, "bold"),
             bg="#DC143C",  # Crimson red
@@ -41,12 +50,12 @@ class DashboardFrame(tk.Frame):
             highlightbackground="#8B0000",  # Dark red border
             highlightcolor="#FF0000"  # Red highlight when focused
         )
-        self.btn_emergency.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        self.btn_emergency.pack(fill="x", padx=5, pady=5)
         
         # Cancel Emergency Button (shown when emergency is active) - Make it more prominent
         self.btn_cancel_emergency = tk.Button(
             emergency_frame,
-            text="⛔ EMERGENCY STOP - CANCEL MODE ⛔",
+            text="🛑 TURN OFF EMERGENCY MODE 🛑",
             command=self.handle_cancel_emergency,
             font=("Arial", 18, "bold"),
             bg="#FF6B35",  # Orange-red for cancel
@@ -63,36 +72,37 @@ class DashboardFrame(tk.Frame):
             highlightcolor="#FFD700"
         )
         # Initially hidden, shown when emergency is active
-        self.btn_cancel_emergency.grid(row=1, column=0, padx=5, pady=8, sticky="ew")
-        self.btn_cancel_emergency.grid_remove()  # Hide initially
+        self.btn_cancel_emergency.pack(fill="x", padx=5, pady=8)
+        self.btn_cancel_emergency.pack_forget()  # Hide initially
         
         # Add help text below emergency button (in a separate row)
         self.help_text = ttk.Label(
             self, 
-            text="Press this button or use Ctrl+Alt+E to send an emergency alert",
+            text="Press button above or use Ctrl+Alt+E • Desktop shortcut requires 4-digit PIN (set in Settings) • Click Settings to configure emergency email and PIN",
             font=("Arial", 9),
-            foreground="gray"
+            foreground="gray",
+            wraplength=600
         )
-        self.help_text.grid(row=1, column=0, pady=(0, 10))
+        self.help_text.pack(pady=(0, 10), padx=20)
         
         # Add a visual separator after emergency button
         separator = ttk.Separator(self, orient="horizontal")
-        separator.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 15))
+        separator.pack(fill="x", padx=20, pady=(0, 15))
         
         lbl_title = ttk.Label(self, text="eMonitor Dashboard", font=("Arial", 18))
-        lbl_title.grid(row=3, column=0, pady=(0, 20))
+        lbl_title.pack(pady=(0, 20))
         
         self.lbl_welcome = ttk.Label(self, text="Welcome, user!")
-        self.lbl_welcome.grid(row=4, column=0, pady=5)
+        self.lbl_welcome.pack(pady=5)
         
         self.lbl_plan_status = ttk.Label(self, text="Plan: Loading...", font=("Arial", 11, "bold"), foreground="gray")
-        self.lbl_plan_status.grid(row=5, column=0, pady=(0, 10))
+        self.lbl_plan_status.pack(pady=(0, 10))
 
         self.lbl_status = ttk.Label(self, text="Status: Stopped", foreground="red", font=("Arial", 12))
-        self.lbl_status.grid(row=6, column=0, pady=10)
+        self.lbl_status.pack(pady=10)
         
         btn_frame = ttk.Frame(self)
-        btn_frame.grid(row=7, column=0, pady=20)
+        btn_frame.pack(pady=20)
         
         self.btn_start = ttk.Button(btn_frame, text="Start Monitoring", command=self.start_monitoring)
         self.btn_start.pack(side="left", padx=10)
@@ -101,7 +111,7 @@ class DashboardFrame(tk.Frame):
         self.btn_stop.pack(side="left", padx=10)
         
         nav_frame = ttk.Frame(self)
-        nav_frame.grid(row=8, column=0, pady=30)
+        nav_frame.pack(pady=30)
         
         # --- !! NEW "VIEW PLANS" BUTTON !! ---
         btn_plans = ttk.Button(nav_frame, text="View Subscription Plans", command=self.go_to_plans)
@@ -160,6 +170,8 @@ class DashboardFrame(tk.Frame):
             return
         
         trigger_alert_process(self.controller)
+        # Immediately update button state to show emergency is ON
+        self.after(100, self.update_emergency_button_state)
     
     def handle_cancel_emergency(self):
         """Handle cancel emergency button press"""
@@ -179,8 +191,16 @@ class DashboardFrame(tk.Frame):
             
             if result:
                 stop_emergency_mode()
-                messagebox.showinfo("Emergency Stopped", "Emergency mode has been stopped successfully.")
+                # Update button state immediately to show OFF status
                 self.update_emergency_button_state()
+                # Show info dialog with emphasized message
+                messagebox.showinfo(
+                    "✓ Emergency Stopped", 
+                    "Emergency mode has been STOPPED successfully.\n\n"
+                    "• All data collection has stopped\n"
+                    "• Final data has been sent to emergency contacts\n"
+                    "• System is back to normal monitoring"
+                )
     
     def update_emergency_button_state(self):
         """Update emergency button visibility based on emergency state"""
@@ -188,40 +208,49 @@ class DashboardFrame(tk.Frame):
         
         try:
             emergency_active = is_emergency_active()
-            log.info(f"Dashboard: Checking emergency state - Active: {emergency_active}")
             
             if emergency_active:
+                # Update status label
+                self.lbl_emergency_status.config(text="Emergency Mode: ON", foreground="red")
                 # Show cancel button, hide emergency button and help text
-                self.btn_emergency.grid_remove()
-                self.help_text.grid_remove()
-                # Make sure cancel button is visible and prominent - FORCE IT TO SHOW
-                self.btn_cancel_emergency.grid(row=1, column=0, padx=5, pady=8, sticky="ew")
+                self.btn_emergency.pack_forget()
+                self.help_text.pack_forget()
+                # Make sure cancel button is visible and prominent
+                self.btn_cancel_emergency.pack(fill="x", padx=5, pady=8)
                 self.btn_cancel_emergency.lift()
-                self.btn_cancel_emergency.update_idletasks()
-                # Force the frame to update
-                self.update_idletasks()
-                log.info("Emergency active - FORCING cancel button to be visible on dashboard")
             else:
+                # Update status label
+                self.lbl_emergency_status.config(text="Emergency Mode: OFF", foreground="green")
                 # Show emergency button and help text, hide cancel button
-                self.btn_emergency.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-                self.help_text.grid(row=1, column=0, pady=(0, 10))
-                self.btn_cancel_emergency.grid_remove()
-                log.debug("Emergency inactive - showing emergency button")
+                self.btn_emergency.pack(fill="x", padx=5, pady=5)
+                self.help_text.pack(fill="x", pady=(0, 10))
+                self.btn_cancel_emergency.pack_forget()
         except Exception as e:
             log.error(f"Error updating emergency button state: {e}")
             import traceback
             log.error(traceback.format_exc())
             # On error, try to show cancel button anyway if emergency might be active
             try:
-                self.btn_cancel_emergency.grid(row=1, column=0, padx=5, pady=8, sticky="ew")
+                self.btn_cancel_emergency.pack(fill="x", padx=5, pady=8)
             except:
                 pass
     
     def check_emergency_state(self):
-        """Periodically check emergency state and update button visibility"""
-        self.update_emergency_button_state()
-        # Check every 2 seconds
-        self.after(2000, self.check_emergency_state)
+        """Periodically check emergency state and update button visibility (only when state changes)"""
+        try:
+            from emergency_alert_manager import is_emergency_active
+            emergency_active = is_emergency_active()
+            
+            # Only update if state has changed (avoid excessive logging)
+            if not hasattr(self, '_last_emergency_state') or self._last_emergency_state != emergency_active:
+                self._last_emergency_state = emergency_active
+                log.debug(f"Dashboard: Emergency state changed - Active: {emergency_active}")
+                self.update_emergency_button_state()
+        except Exception as e:
+            log.error(f"Error checking emergency state: {e}")
+        
+        # Check every 5 seconds instead of 2
+        self.after(5000, self.check_emergency_state)
 
     def on_show(self):
         """Called when frame is shown. Updates welcome and plan status."""
