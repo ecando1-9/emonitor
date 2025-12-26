@@ -1,9 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from logger_setup import log
-from alert_manager import trigger_alert_process
 from auth import auth_service
-from .pin_ui import PinFrame
 
 class LoginFrame(tk.Frame):
     def __init__(self, parent, controller):
@@ -38,9 +36,7 @@ class LoginFrame(tk.Frame):
         self.lbl_status = ttk.Label(self, text="", foreground="red")
         self.lbl_status.grid(row=7, column=0, pady=10)
         
-        self.lbl_pin_login = ttk.Label(self, text="Login with PIN instead?", foreground="blue", cursor="hand2")
-        self.lbl_pin_login.grid(row=8, column=0, pady=5)
-        self.lbl_pin_login.bind("<Button-1>", lambda e: controller.show_frame(PinFrame))
+        # PIN login removed; no shortcut to PIN screen
         
         self.lbl_forgot = ttk.Label(self, text="Forgot Password?", foreground="blue", cursor="hand2")
         self.lbl_forgot.grid(row=9, column=0, pady=5)
@@ -50,8 +46,8 @@ class LoginFrame(tk.Frame):
         self.lbl_status.config(text=message, foreground=color)
 
     def set_emergency_mode(self):
-        self.trigger_alert_on_login = True
-        self.lbl_status.config(text="EMERGENCY: Please log in to send alert.", foreground="red")
+        # Emergency mode removed; do not trigger alerts on login
+        self.lbl_status.config(text="", foreground="red")
 
     def handle_forgot_password(self, event=None):
         email = self.entry_email.get()
@@ -101,19 +97,13 @@ class LoginFrame(tk.Frame):
             
             if status == 'active' or status == 'trialing':
                 self.controller.post_login_setup()
-                if self.controller.config.get_settings()["user"].get("pin_login_enabled") and \
-                   not self.controller.config.get_settings()["user"].get("hashed_pin"):
-                    log.info("PIN enabled but not set. Forcing PIN setup.")
-                    self.controller.show_frame(PinFrame, setup_mode=True)
-                else:
-                    self.controller.show_frame(DashboardFrame)
+                # PIN-login option removed: always show dashboard after successful login
+                self.controller.show_frame(DashboardFrame)
             else:
                 log.warning(f"Login blocked. User status is: {status}")
                 self.controller.show_frame(SubscriptionFrame, sub_data=sub_data)
 
-            if self.trigger_alert_on_login:
-                trigger_alert_process(self.controller)
-                self.trigger_alert_on_login = False
+            # Emergency trigger disabled
         else:
             raw_error = str(result.get('error', 'Unknown error'))
             log.error(f"Login failed: {raw_error}")
@@ -151,23 +141,15 @@ class LoginFrame(tk.Frame):
                 self.lbl_status.config(text="Signup Failed: Could not create user subscription.", foreground="red")
                 auth_service.full_logout() # Log them out
                 return
-                
             status = sub_data.get("status")
-            
-            if status == 'trialing':
-                if messagebox.askyesno("PIN Login", "Would you like to set up a 4-digit PIN for faster, secure login?"):
-                    log.info("New user. Navigating to PIN setup.")
-                    self.controller.show_frame(PinFrame, setup_mode=True)
-                else:
-                    self.controller.show_frame(DashboardFrame)
+            if status == 'trialing' or status == 'active':
+                self.controller.show_frame(DashboardFrame)
             else:
                 from .subscription_ui import SubscriptionFrame
                 log.error(f"Signup user has bad status: {status}")
                 self.controller.show_frame(SubscriptionFrame, sub_data=sub_data)
 
-            if self.trigger_alert_on_login:
-                trigger_alert_process(self.controller)
-                self.trigger_alert_on_login = False
+            # Emergency trigger disabled
         else:
             raw_error = str(result.get('error', 'Unknown error'))
             log.error(f"Sign up failed: {raw_error}")

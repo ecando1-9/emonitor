@@ -5,8 +5,6 @@ import re
 import os
 import persistence
 from auth import auth_service
-from .pin_ui import PinFrame
-from .password_prompt_ui import PasswordConfirmationDialog
 
 # --- !! HELPER DICTIONARY TO MAP CONFIG NAMES TO DATABASE FEATURE NAMES !! ---
 # This maps local config keys (screenshot) to database feature names (SCREENSHOT)
@@ -75,21 +73,15 @@ class SettingsFrame(tk.Frame):
         
         security_frame = ttk.LabelFrame(self.scrollable_frame, text="Security & Login")
         security_frame.pack(fill="x", padx=20, pady=10)
-        self.pin_login_var = tk.BooleanVar()
-        self.chk_pin_login = ttk.Checkbutton(
-            security_frame,
-            text=f"Enable PIN Login (requires email/password login every {self.settings.get('user', {}).get('login_expiry_hours', 168) // 24} days)",
-            variable=self.pin_login_var,
-            command=self.toggle_pin_login
-        )
-        self.chk_pin_login.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        self.btn_change_pin = ttk.Button(security_frame, text="Change PIN", command=self.prompt_for_password_to_change_pin, state="disabled")
-        self.btn_change_pin.grid(row=0, column=1, padx=10, pady=5)
+        # Secure login PIN option removed from Settings UI
+        self.pin_login_var = tk.BooleanVar(value=False)
+        # No user-facing control for PIN login. Internal flags remain in config.
         
         # Emergency Alert Settings Frame
         emergency_frame = ttk.LabelFrame(self.scrollable_frame, text="Emergency Alert Settings")
         emergency_frame.pack(fill="x", padx=20, pady=10)
         
+        # Emergency feature enabled — user can configure emergency settings
         self.emergency_enabled_var = tk.BooleanVar()
         self.chk_emergency = ttk.Checkbutton(
             emergency_frame,
@@ -187,11 +179,11 @@ class SettingsFrame(tk.Frame):
         ttk.Label(pin_input_frame, text="PIN:").pack(side="left", padx=(0, 5))
         self.entry_emergency_pin = ttk.Entry(pin_input_frame, width=10, show="*", font=("Arial", 12), justify="center")
         self.entry_emergency_pin.pack(side="left", padx=(0, 10))
+        # Update button for Emergency PIN — user must click to save/confirm PIN
+        btn_update_pin = ttk.Button(pin_input_frame, text="Update PIN", command=self.update_emergency_pin)
+        btn_update_pin.pack(side="left", padx=(0,10))
         
-        ttk.Label(pin_input_frame, text="Confirm:").pack(side="left", padx=(0, 5))
-        self.entry_emergency_pin_confirm = ttk.Entry(pin_input_frame, width=10, show="*", font=("Arial", 12), justify="center")
-        self.entry_emergency_pin_confirm.pack(side="left", padx=(0, 10))
-        
+        # Single PIN entry for desktop shortcut (4 digits)
         self.lbl_emergency_pin_status = ttk.Label(pin_frame, text="", font=("Arial", 9))
         self.lbl_emergency_pin_status.pack(anchor="w", pady=(10, 0))
         
@@ -327,42 +319,7 @@ class SettingsFrame(tk.Frame):
         self.update_save_path_label()
         self.toggle_local_save_widgets()
 
-    def go_to_pin_setup(self):
-        self.controller.show_frame(PinFrame, setup_mode=True)
-
-    def prompt_for_password_to_change_pin(self):
-        log.info("User requested to change PIN. Asking for password verification.")
-        PasswordConfirmationDialog(self, "Verify Password", 
-                                   "Please enter your login password to change your PIN.", 
-                                   self.on_password_verified_for_pin)
-
-    def on_password_verified_for_pin(self):
-        log.info("Password verified. Opening PIN setup.")
-        self.go_to_pin_setup()
-        self.pin_login_var.set(True)
-        self.update_pin_button_state()
-        
-    def toggle_pin_login(self):
-        if self.pin_login_var.get():
-            if self.settings["user"].get("hashed_pin"):
-                log.info("User enabling PIN login (PIN already set).")
-                self.settings["user"]["pin_login_enabled"] = True
-                self.controller.config.update_settings(self.settings)
-                auth_service.save_full_login_session(auth_service.session.refresh_token)
-                days = self.settings['user']['login_expiry_hours'] // 24
-                messagebox.showinfo("PIN Login Enabled", f"PIN login is now enabled. You must login with email/password at least once every {days} days.")
-            else:
-                log.info("User enabling PIN login (no PIN set). Forcing setup.")
-                self.prompt_for_password_to_change_pin()
-        else:
-            log.info("User disabling PIN login.")
-            auth_service.full_logout()
-            messagebox.showinfo("PIN Login Disabled", "PIN login and 'Keep me logged in' have been disabled.")
-        
-        self.update_pin_button_state()
-
-    def update_pin_button_state(self):
-        self.btn_change_pin.config(state="normal" if self.pin_login_var.get() else "disabled")
+    # Secure login PIN helper methods removed from SettingsFrame
 
     def toggle_local_save_widgets(self):
         if self.local_save_var.get():
@@ -383,7 +340,6 @@ class SettingsFrame(tk.Frame):
         self.entry_new_contact.config(state=state)
         self.emergency_contacts_listbox.config(state=state)
         self.entry_emergency_pin.config(state=state)
-        self.entry_emergency_pin_confirm.config(state=state)
     
     def add_emergency_contact(self):
         """Add a new emergency contact with name and phone number"""
@@ -445,6 +401,32 @@ class SettingsFrame(tk.Frame):
         except Exception as e:
             log.error(f"Failed to remove shortcut: {e}")
             messagebox.showerror("Error", f"Failed to remove desktop shortcut: {e}")
+
+    def update_emergency_pin(self):
+        """Validate and update the emergency shortcut PIN immediately when user clicks Update"""
+        try:
+            pin = self.entry_emergency_pin.get().strip()
+            if not pin:
+                messagebox.showwarning("No PIN Entered", "Please enter a 4-digit PIN before clicking Update.")
+                return
+            if len(pin) != 4 or not pin.isdigit():
+                messagebox.showerror("Invalid PIN", "Emergency shortcut PIN must be exactly 4 digits.")
+                return
+            from persistence import hash_pin
+            salt_hex, hashed_hex = hash_pin(pin)
+            # Persist immediately to settings
+            settings = self.controller.config.get_settings()
+            if "emergency" not in settings:
+                settings["emergency"] = {}
+            settings["emergency"]["emergency_shortcut_pin_salt"] = salt_hex
+            settings["emergency"]["emergency_shortcut_pin_hash"] = hashed_hex
+            self.controller.config.update_settings(settings)
+            self.lbl_emergency_pin_status.config(text="Emergency shortcut PIN updated.", foreground="green")
+            messagebox.showinfo("Updated", "Emergency PIN updated successfully.")
+            self.entry_emergency_pin.delete(0, tk.END)
+        except Exception as e:
+            log.error(f"Failed to update emergency PIN: {e}")
+            messagebox.showerror("Error", f"Failed to update Emergency PIN: {e}")
 
     def update_save_path_label(self):
         path = self.settings["user"].get("local_save_path")
@@ -698,8 +680,7 @@ class SettingsFrame(tk.Frame):
             log.error(f"Failed to check startup: {e}")
             self.startup_var.set(False)
         
-        self.pin_login_var.set(self.settings["user"].get("pin_login_enabled", False))
-        self.update_pin_button_state()
+        # Secure login PIN removed; do not expose or change this setting from UI
         self.prevent_sleep_var.set(self.settings["user"].get("prevent_sleep_while_running", True))
         
         self.entry_email.delete(0, tk.END)
@@ -732,11 +713,10 @@ class SettingsFrame(tk.Frame):
         
         # Load emergency shortcut PIN status (don't show the PIN, just status)
         self.entry_emergency_pin.delete(0, tk.END)
-        self.entry_emergency_pin_confirm.delete(0, tk.END)
         if emergency_cfg.get("emergency_shortcut_pin_salt") and emergency_cfg.get("emergency_shortcut_pin_hash"):
-            self.lbl_emergency_pin_status.config(text="Emergency shortcut PIN is set. Enter new PIN twice to change it.", foreground="green")
+            self.lbl_emergency_pin_status.config(text="Emergency shortcut PIN is set. Enter new PIN to change it.", foreground="green")
         else:
-            self.lbl_emergency_pin_status.config(text="No emergency shortcut PIN set. Enter PIN twice to set it.", foreground="orange")
+            self.lbl_emergency_pin_status.config(text="No emergency shortcut PIN set. Enter a 4-digit PIN to set it.", foreground="orange")
         
         # Load emergency contacts (handle both old format - just phone, and new format - name - phone)
         self.emergency_contacts_listbox.delete(0, tk.END)
@@ -846,7 +826,6 @@ class SettingsFrame(tk.Frame):
             self.settings["user"]["device_name"] = self.entry_device_name.get()
             self.settings["user"]["local_save_enabled"] = self.local_save_var.get()
             self.settings["user"]["prevent_sleep_while_running"] = self.prevent_sleep_var.get()
-            self.settings["user"]["pin_login_enabled"] = self.pin_login_var.get()
             
             # Save emergency settings
             if "emergency" not in self.settings:
@@ -857,30 +836,20 @@ class SettingsFrame(tk.Frame):
             self.settings["emergency"]["user_phone"] = self.entry_user_phone.get().strip()
             self.settings["emergency"]["emergency_email"] = self.entry_emergency_email.get().strip()
             
-            # Handle emergency shortcut PIN
-            pin1 = self.entry_emergency_pin.get().strip()
-            pin2 = self.entry_emergency_pin_confirm.get().strip()
-            
-            if pin1 or pin2:  # User entered something
-                if not pin1 or not pin2:
-                    messagebox.showwarning("PIN Error", "Please enter the emergency shortcut PIN in both fields to set/change it.")
-                    return
-                if pin1 != pin2:
-                    messagebox.showerror("PIN Mismatch", "The two PIN entries do not match. Please try again.")
-                    return
-                if len(pin1) != 4 or not pin1.isdigit():
+            # Handle emergency shortcut PIN (single entry)
+            pin = self.entry_emergency_pin.get().strip()
+            if pin:  # User entered something
+                if len(pin) != 4 or not pin.isdigit():
                     messagebox.showerror("Invalid PIN", "Emergency shortcut PIN must be exactly 4 digits.")
                     return
-                
                 # Hash and save the PIN
                 from persistence import hash_pin
-                salt_hex, hashed_hex = hash_pin(pin1)
+                salt_hex, hashed_hex = hash_pin(pin)
                 self.settings["emergency"]["emergency_shortcut_pin_salt"] = salt_hex
                 self.settings["emergency"]["emergency_shortcut_pin_hash"] = hashed_hex
                 self.lbl_emergency_pin_status.config(text="Emergency shortcut PIN saved successfully!", foreground="green")
-                # Clear the fields after saving
+                # Clear the field after saving
                 self.entry_emergency_pin.delete(0, tk.END)
-                self.entry_emergency_pin_confirm.delete(0, tk.END)
             
             # Get emergency contacts from listbox (parse "Name - Phone" format)
             emergency_contacts = []

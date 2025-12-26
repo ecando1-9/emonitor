@@ -2,7 +2,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from logger_setup import log
 from auth import auth_service
-from alert_manager import trigger_alert_process
 
 class PinFrame(tk.Frame):
     def __init__(self, parent, controller):
@@ -33,10 +32,9 @@ class PinFrame(tk.Frame):
         self.trigger_alert_on_login = False
 
     def set_emergency_mode(self):
-        """Called by main_window if app is started with --emergency"""
-        self.trigger_alert_on_login = True
-        log.info("PIN screen in emergency mode. Awaiting PIN.")
-        self.lbl_status.config(text="EMERGENCY: Enter PIN to send alert.", foreground="red")
+        # Emergency mode removed; do not trigger alerts from PIN screen
+        log.info("PIN screen: emergency mode ignored (feature removed).")
+        self.lbl_status.config(text="")
 
     def on_show(self, setup_mode=False):
         """Called when the frame is shown."""
@@ -122,10 +120,7 @@ class PinFrame(tk.Frame):
                     log.warning(f"Login blocked. User status is: {status}")
                     self.controller.show_frame(SubscriptionFrame, sub_data=sub_data)
 
-                if self.trigger_alert_on_login:
-                    log.info("PIN login successful in emergency mode. Triggering alert.")
-                    trigger_alert_process(self.controller)
-                    self.trigger_alert_on_login = False
+                # Emergency-trigger-on-login disabled
             else:
                 log.warning(f"PIN login failed: {message}")
                 self.lbl_status.config(text=message, foreground="red")

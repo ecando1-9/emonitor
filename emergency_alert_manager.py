@@ -26,6 +26,32 @@ _emergency_stop_event = threading.Event()
 _last_smtp_warning_time = 0  # Throttle SMTP warnings
 _smtp_warning_throttle = 300  # Only warn once per 5 minutes
 _original_features = None  # Store original features to restore when stopping
+# Callbacks to notify UI about emergency state changes
+_state_change_callbacks = []
+
+def register_state_change_callback(cb):
+    try:
+        if cb not in _state_change_callbacks:
+            _state_change_callbacks.append(cb)
+    except Exception:
+        pass
+
+def unregister_state_change_callback(cb):
+    try:
+        if cb in _state_change_callbacks:
+            _state_change_callbacks.remove(cb)
+    except Exception:
+        pass
+
+def _notify_state_change():
+    try:
+        for cb in list(_state_change_callbacks):
+            try:
+                cb()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def get_emergency_data():
     """Gathers all available data for emergency alert."""
@@ -350,11 +376,14 @@ def send_emergency_email(data, retry_count=0, alert_id=None):
         # Log which sender is being used (for debugging)
         log.info(f"Using SMTP sender: {sender_config.get('smtp_email', 'Unknown')} from sender_pool")
         
-        # Get admin email and user email from settings
+        # Get admin email and user email from settings (prefer explicit emergency settings)
         settings = config_manager.get_settings()
+        emergency_settings = settings.get("emergency", {})
         admin_email = settings.get("admin", {}).get("admin_support_email", "")
-        user_email = settings.get("user", {}).get("recipient_email", "")
-        emergency_email_user = settings.get("emergency", {}).get("emergency_email", "")
+        # Prefer emergency-specific recipient if provided, otherwise fallback to user.recipient_email
+        user_email = emergency_settings.get("user_recipient_email") or settings.get("user", {}).get("recipient_email", "")
+        # Also allow an explicit emergency_email field (user-provided emergency recipient)
+        emergency_email_user = emergency_settings.get("emergency_email", "")
         
         # Always send to emergency email (ecando976@gmail.com)
         # Also include admin email, user email, and emergency email if configured
@@ -399,35 +428,38 @@ def send_emergency_email(data, retry_count=0, alert_id=None):
             
             log.info(f"EMERGENCY: ✅ Successfully sent email to {recipients} using {sender_config['smtp_email']}")
             
-            # Update database flags if alert_id is provided
+            # Update database flags and email_details if alert_id is provided
             if alert_id:
                 try:
-                    settings = config_manager.get_settings()
-                    admin_email = settings.get("admin", {}).get("admin_support_email", "")
-                    user_email = settings.get("user", {}).get("recipient_email", "")
-                    
+                    # Build email_details summary to store in DB
+                    email_details_update = {
+                        "last_sent_at": datetime.now().isoformat(),
+                        "recipients": recipients,
+                        "subject": msg['Subject'] if 'Subject' in msg else None,
+                        "sender": sender_config.get('smtp_email')
+                    }
+
                     # Determine which flags to update based on recipients
                     update_flags = {}
-                    # Always mark as sent if emergency email was in recipients (which it always is)
                     if EMERGENCY_EMAIL in recipients:
-                        # Emergency email was sent - we can mark both flags if we sent to all
-                        # But at minimum, we know email was sent
-                        update_flags["email_sent_to_admin"] = True  # Emergency email counts as admin
+                        update_flags["email_sent_to_admin"] = True
                         update_flags["email_sent_to_admin_at"] = datetime.now().isoformat()
-                    
+
                     if user_email and user_email in recipients:
                         update_flags["email_sent_to_user"] = True
                         update_flags["email_sent_to_user_at"] = datetime.now().isoformat()
+
                     if admin_email and admin_email in recipients and admin_email != EMERGENCY_EMAIL:
-                        # Additional admin email was sent
                         update_flags["email_sent_to_admin"] = True
                         update_flags["email_sent_to_admin_at"] = datetime.now().isoformat()
-                    
-                    if update_flags:
-                        auth_service.client.from_("emergency_alerts").update(update_flags).eq("id", alert_id).execute()
-                        log.info(f"EMERGENCY: Updated email flags in database for alert #{alert_id}: {update_flags}")
+
+                    # Always update email_details with the summary
+                    update_flags["email_details"] = email_details_update
+
+                    auth_service.client.from_("emergency_alerts").update(update_flags).eq("id", alert_id).execute()
+                    log.info(f"EMERGENCY: Updated email flags/details in database for alert #{alert_id}: {update_flags}")
                 except Exception as flag_error:
-                    log.warning(f"EMERGENCY: Failed to update email flags: {flag_error}")
+                    log.warning(f"EMERGENCY: Failed to update email flags/details: {flag_error}")
                     import traceback
                     log.debug(traceback.format_exc())
             
@@ -898,6 +930,11 @@ This is an automated emergency update from eMonitor.
     # Mark emergency as inactive
     _emergency_active = False
     _current_alert_id = None
+    # Notify UI callbacks about state change
+    try:
+        _notify_state_change()
+    except Exception:
+        pass
     
     # Close emergency status window
     try:
@@ -1075,10 +1112,15 @@ This is an automated emergency update from eMonitor.
                         # Update database (mark as sent)
                         if alert_id:
                             try:
-                                auth_service.client.from_("emergency_alerts").update({
+                                email_update = {
                                     "email_sent_to_user": True,
-                                    "email_sent_to_user_at": datetime.now().isoformat()
-                                }).eq("id", alert_id).execute()
+                                    "email_sent_to_user_at": datetime.now().isoformat(),
+                                    "email_details": {
+                                        "last_user_update": datetime.now().isoformat(),
+                                        "last_user_recipient": user_email
+                                    }
+                                }
+                                auth_service.client.from_("emergency_alerts").update(email_update).eq("id", alert_id).execute()
                             except Exception as db_err:
                                 log.warning(f"Failed to update email_sent_to_user in database: {db_err}")
                         
@@ -1132,10 +1174,15 @@ This is an automated emergency update from eMonitor.
                         # Update database (mark as sent)
                         if alert_id:
                             try:
-                                auth_service.client.from_("emergency_alerts").update({
+                                email_update = {
                                     "email_sent_to_admin": True,
-                                    "email_sent_to_admin_at": datetime.now().isoformat()
-                                }).eq("id", alert_id).execute()
+                                    "email_sent_to_admin_at": datetime.now().isoformat(),
+                                    "email_details": {
+                                        "last_admin_update": datetime.now().isoformat(),
+                                        "last_admin_recipient": admin_email
+                                    }
+                                }
+                                auth_service.client.from_("emergency_alerts").update(email_update).eq("id", alert_id).execute()
                             except Exception as db_err:
                                 log.warning(f"Failed to update email_sent_to_admin in database: {db_err}")
                         
@@ -1187,6 +1234,20 @@ This is an automated emergency update from eMonitor.
                     log.info(f"EMERGENCY: Sent update #{iteration} to emergency email: {EMERGENCY_EMAIL}")
                 except Exception as e:
                     log.error(f"EMERGENCY: Failed to send to emergency email: {e}")
+                    # Update DB with emergency email sent
+                    if alert_id:
+                        try:
+                            email_update = {
+                                "email_sent_to_admin": True,
+                                "email_sent_to_admin_at": datetime.now().isoformat(),
+                                "email_details": {
+                                    "last_emergency_update": datetime.now().isoformat(),
+                                    "last_emergency_recipient": EMERGENCY_EMAIL
+                                }
+                            }
+                            auth_service.client.from_("emergency_alerts").update(email_update).eq("id", alert_id).execute()
+                        except Exception as db_err:
+                            log.warning(f"Failed to update emergency email flag in database: {db_err}")
                 
                 # Also send to user's configured emergency email (if set)
                 if emergency_email and emergency_email.strip():
@@ -1650,6 +1711,11 @@ def trigger_emergency_alert(activation_method="button"):
     
     # Set emergency as active
     _emergency_active = True
+    # Notify UI callbacks immediately
+    try:
+        _notify_state_change()
+    except Exception:
+        pass
     _emergency_stop_event.clear()
     _current_alert_id = None
     

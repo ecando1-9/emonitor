@@ -14,6 +14,8 @@ class DashboardFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        # Register/unregister for emergency state callbacks
+        self._registered_for_emergency_callbacks = False
         
         self.grid_columnconfigure(0, weight=1)
         
@@ -176,31 +178,49 @@ class DashboardFrame(tk.Frame):
     def handle_cancel_emergency(self):
         """Handle cancel emergency button press"""
         from emergency_alert_manager import is_emergency_active, stop_emergency_mode
-        
+        from persistence import verify_pin
+        from config import config_manager
+        from tkinter import simpledialog
+
         if is_emergency_active():
-            # Ask for confirmation
-            result = messagebox.askyesno(
-                "Stop Emergency Mode?",
-                "Are you sure you want to stop emergency mode?\n\n"
-                "This will:\n"
-                "• Stop all data collection\n"
-                "• Send final data update\n"
-                "• Restore normal monitoring settings",
-                icon="warning"
-            )
-            
-            if result:
-                stop_emergency_mode()
-                # Update button state immediately to show OFF status
-                self.update_emergency_button_state()
-                # Show info dialog with emphasized message
-                messagebox.showinfo(
-                    "✓ Emergency Stopped", 
-                    "Emergency mode has been STOPPED successfully.\n\n"
-                    "• All data collection has stopped\n"
-                    "• Final data has been sent to emergency contacts\n"
-                    "• System is back to normal monitoring"
+            # Require PIN if configured, otherwise confirm
+            settings = config_manager.get_settings()
+            emergency_cfg = settings.get('emergency', {})
+            salt = emergency_cfg.get('emergency_shortcut_pin_salt')
+            hashed = emergency_cfg.get('emergency_shortcut_pin_hash')
+
+            if salt and hashed:
+                pin = simpledialog.askstring("Confirm PIN", "Enter Emergency PIN to stop emergency:", show='*', parent=self)
+                if not pin:
+                    messagebox.showinfo("Cancelled", "Emergency stop cancelled.", parent=self)
+                    return
+                if not (pin.isdigit() and len(pin) == 4):
+                    messagebox.showerror("Invalid PIN", "PIN must be exactly 4 digits.", parent=self)
+                    return
+                if not verify_pin(pin, salt, hashed):
+                    messagebox.showerror("Incorrect PIN", "The PIN entered is incorrect.", parent=self)
+                    return
+                # PIN verified - proceed
+            else:
+                result = messagebox.askyesno(
+                    "Stop Emergency Mode?",
+                    "No Emergency PIN is configured. Are you sure you want to stop emergency mode?",
+                    icon="warning"
                 )
+                if not result:
+                    return
+
+            stop_emergency_mode()
+            # Update button state immediately to show OFF status
+            self.update_emergency_button_state()
+            # Show info dialog with emphasized message
+            messagebox.showinfo(
+                "✓ Emergency Stopped", 
+                "Emergency mode has been STOPPED successfully.\n\n"
+                "• All data collection has stopped\n"
+                "• Final data has been sent to emergency contacts\n"
+                "• System is back to normal monitoring"
+            )
     
     def update_emergency_button_state(self):
         """Update emergency button visibility based on emergency state"""
@@ -234,6 +254,13 @@ class DashboardFrame(tk.Frame):
                 self.btn_cancel_emergency.pack(fill="x", padx=5, pady=8)
             except:
                 pass
+
+    def _on_emergency_state_changed(self):
+        try:
+            # Ensure UI update runs on mainloop
+            self.after(0, self.update_emergency_button_state)
+        except Exception:
+            pass
     
     def check_emergency_state(self):
         """Periodically check emergency state and update button visibility (only when state changes)"""
@@ -259,6 +286,16 @@ class DashboardFrame(tk.Frame):
         
         # Start periodic check for emergency state changes
         self.check_emergency_state()
+        # Register for immediate emergency state notifications (only once)
+        try:
+            from emergency_alert_manager import register_state_change_callback
+            if not self._registered_for_emergency_callbacks:
+                register_state_change_callback(self._on_emergency_state_changed)
+                self._registered_for_emergency_callbacks = True
+                # Unregister when this frame is destroyed
+                self.bind('<Destroy>', lambda e: __import__('emergency_alert_manager').unregister_state_change_callback(self._on_emergency_state_changed))
+        except Exception:
+            pass
         
         # Refresh subscription status to get latest plan info
         if self.controller.auth.current_user:
@@ -320,9 +357,28 @@ class DashboardFrame(tk.Frame):
         else:
             self.lbl_plan_status.config(text="Plan: Unknown (Could not load)", foreground="red")
         
+        # Disable Start Monitoring if subscription is not active/trialing
+        try:
+            if sub_data is None or sub_data.get("status") not in ("active", "trialing"):
+                self.btn_start.config(state="disabled")
+            else:
+                self.btn_start.config(state="normal")
+        except Exception:
+            self.btn_start.config(state="disabled")
+        
     def start_monitoring(self):
         global scheduler_thread
         log.info("Start Monitoring button clicked.")
+        # Check subscription status before starting monitoring
+        try:
+            sub_data = self.controller.auth.subscription_data
+            if sub_data is None or sub_data.get("status") not in ("active", "trialing"):
+                messagebox.showwarning("Subscription Required", "Your subscription is expired or inactive. Start Monitoring is disabled.")
+                return
+        except Exception:
+            # If we can't determine subscription, be conservative and prevent start
+            messagebox.showwarning("Subscription Check Failed", "Could not verify subscription status. Please try again later.")
+            return
         settings = self.controller.config.get_settings()
         recipient = settings["user"]["recipient_email"]
         if not recipient:
@@ -376,13 +432,9 @@ class DashboardFrame(tk.Frame):
         
     def handle_logout(self):
         from .login_ui import LoginFrame
-        from .pin_ui import PinFrame
-        
+
         self.stop_monitoring()
-        auth_service.sign_out() 
-        
-        settings = self.controller.config.get_settings()
-        if settings["user"].get("pin_login_enabled"):
-            self.controller.show_frame(PinFrame)
-        else:
-            self.controller.show_frame(LoginFrame)
+        auth_service.sign_out()
+
+        # PIN login removed — always go to Login screen
+        self.controller.show_frame(LoginFrame)

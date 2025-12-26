@@ -81,7 +81,7 @@ def on_close_to_tray():
 
 # --- Main Application ---
 if __name__ == "__main__":
-    log.info("Application starting...")
+    # Application starting log removed per user request
     
     start_in_emergency_mode = False
     start_minimized = False

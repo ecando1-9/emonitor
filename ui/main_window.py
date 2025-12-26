@@ -14,7 +14,10 @@ from auth import auth_service
 from config import config_manager, CURRENT_APP_VERSION, VERSION_CHECK_URL
 from consent import consent_manager
 from logger_setup import log
-import pygame 
+import os
+# Hide the pygame support prompt banner when importing pygame
+os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
+import pygame
 from power_manager import allow_sleep
 import threading
 import requests

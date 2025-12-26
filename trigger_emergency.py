@@ -69,6 +69,11 @@ def show_pin_and_confirm(require_pin=True):
             pin_hash = emergency_settings.get("emergency_shortcut_pin_hash")
             
             if pin_salt and pin_hash:
+                # Enforce exactly 4 digits for the emergency shortcut PIN
+                if not (pin and pin.isdigit() and len(pin) == 4):
+                    messagebox.showerror("Incorrect PIN", "The PIN must be exactly 4 digits.\n\nEmergency alert not triggered.", parent=root)
+                    root.destroy()
+                    return False
                 if not verify_pin(pin, pin_salt, pin_hash):
                     messagebox.showerror("Incorrect PIN", "The PIN you entered is incorrect.\n\nEmergency alert not triggered.", parent=root)
                     root.destroy()

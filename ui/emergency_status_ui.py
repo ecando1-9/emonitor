@@ -1,217 +1,183 @@
 import tkinter as tk
-from tkinter import ttk
-from logger_setup import log
-import threading
+from tkinter import ttk, messagebox, simpledialog
 import time
 
 class EmergencyStatusWindow(tk.Toplevel):
-    """
-    A persistent window that shows emergency mode is active and provides a cancel button.
-    This window stays visible until emergency mode is stopped.
-    """
     def __init__(self, parent):
         super().__init__(parent)
         self.title("*** EMERGENCY MODE ACTIVE ***")
-        self.geometry("700x500")
-        self.transient(parent)
-        self.resizable(True, True)  # Make window resizable
-        self.minsize(600, 400)  # Set minimum size
         
-        # Make window always on top
+        # 1. Force the window to be an independent "top-level"
         self.attributes('-topmost', True)
+        self.withdraw()  # Hide while we calculate size
         
-        # Style - Red/Orange background for emergency
+        # 2. Styling
         self.configure(bg="#8B0000")
         
-        # Main container - make it expandable and configure for resizing
-        main_frame = tk.Frame(self, bg="#8B0000")
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        # 3. Create UI first so it has a "size"
+        self.main_frame = tk.Frame(self, bg="#8B0000")
+        self.main_frame.pack(fill="both", expand=True)
         
-        # Title
-        title_label = tk.Label(
-            main_frame,
-            text="*** EMERGENCY MODE ACTIVE ***",
-            font=("Arial", 18, "bold"),
-            bg="#8B0000",
-            fg="white"
+        self.label = tk.Label(
+            self.main_frame, 
+            text="*** EMERGENCY MODE ACTIVE ***", 
+            font=("Arial", 25, "bold"),
+            fg="white", bg="#8B0000"
         )
-        title_label.pack(pady=(10, 20))
-        
-        # Status info - make it more detailed and expandable
-        info_text = """Emergency alert has been triggered and is actively collecting data.
+        self.label.pack(expand=True)
 
-Data is being sent every 15 seconds to:
-• Emergency contacts
-• Admin email
-• Emergency email
-
-All monitoring features are enabled:
-• Screen recording
-• Camera capture
-• Activity monitoring
-• Location tracking
-• Telemetry data"""
-        
-        # Use a frame for info text that can expand
-        info_frame = tk.Frame(main_frame, bg="#8B0000")
-        info_frame.pack(fill="both", expand=True, pady=15, padx=20)
-        
-        info_label = tk.Label(
-            info_frame,
-            text=info_text,
-            font=("Arial", 12),
-            bg="#8B0000",
-            fg="white",
-            justify="left",
-            wraplength=600
-        )
-        info_label.pack(anchor="w")
-        
-        # Update wraplength when window is resized
-        def update_wraplength(event=None):
-            if event:
-                new_width = max(400, event.width - 80)  # Account for padding
-                info_label.config(wraplength=new_width)
-        
-        self.bind('<Configure>', update_wraplength)
-        
-        # Timer label (shows how long emergency has been active)
-        self.timer_label = tk.Label(
-            main_frame,
-            text="Active for: 0 seconds",
-            font=("Arial", 12, "bold"),
-            bg="#8B0000",
-            fg="#FFD700"  # Gold color
-        )
-        self.timer_label.pack(pady=10)
-        
-        # Add separator before cancel button
-        separator = tk.Frame(main_frame, bg="#FF6B35", height=2)
-        separator.pack(fill="x", pady=20, padx=20)
-        
-        # Cancel button - Large and very prominent
-        cancel_button = tk.Button(
-            main_frame,
-            text="[STOP] CANCEL / STOP EMERGENCY MODE [STOP]",
+        self.stop_btn = tk.Button(
+            self.main_frame,
+            text="STOP EMERGENCY MODE",
+            font=("Arial", 20, "bold"),
+            bg="#FF6B35", fg="white",
             command=self.stop_emergency,
-            font=("Arial", 18, "bold"),
-            bg="#FF6B35",  # Orange-red
-            fg="white",
-            activebackground="#E55A2B",
-            activeforeground="white",
-            relief="raised",
-            bd=5,
-            padx=50,
-            pady=20,
-            cursor="hand2",
-            highlightthickness=3,
-            highlightbackground="#FFD700",
-            highlightcolor="#FFD700"
+            pady=20
         )
-        cancel_button.pack(pady=25, padx=20, fill="x", expand=True)
-        
-        # Warning text - make it more visible
-        warning_label = tk.Label(
-            main_frame,
-            text="!!! Click the button above to cancel and stop emergency mode !!!",
-            font=("Arial", 12, "bold"),
-            bg="#8B0000",
-            fg="#FFD700"
-        )
-        warning_label.pack(pady=10)
-        
-        # Start timer
-        self.start_time = time.time()
-        self.update_timer()
-        
-        # Handle window close - don't allow closing without stopping emergency
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-    
-    def update_timer(self):
-        """Update the timer showing how long emergency has been active"""
+        self.stop_btn.pack(pady=50, padx=100, fill="x")
+
+        # Grace period label
+        self.grace_seconds = 30
+        self.grace_label = tk.Label(self.main_frame, text=f"Grace period: {self.grace_seconds}s", font=("Arial", 14, "bold"), fg="#FFD700", bg="#8B0000")
+        self.grace_label.pack()
+        self.update_grace_period()
+
+        # 4. Trigger the maximization after a 100ms delay
+        # This solves the "stuck at small size" issue
+        self.after(100, self.force_maximize)
+
+    def force_maximize(self):
+        """Forces the window to the monitor's full resolution."""
         try:
-            from emergency_alert_manager import is_emergency_active
-            if is_emergency_active():
-                elapsed = int(time.time() - self.start_time)
-                minutes = elapsed // 60
-                seconds = elapsed % 60
-                if minutes > 0:
-                    self.timer_label.config(text=f"Active for: {minutes}m {seconds}s")
-                else:
-                    self.timer_label.config(text=f"Active for: {seconds} seconds")
-                # Update every second
-                self.after(1000, self.update_timer)
-            else:
-                # Emergency stopped, close window
-                self.destroy()
+            # Get screen width and height
+            screen_w = self.winfo_screenwidth()
+            screen_h = self.winfo_screenheight()
+            
+            # Force the window size to the screen size
+            self.geometry(f"{screen_w}x{screen_h}+0+0")
+            
+            # Try to set the OS state to zoomed as well
+            try:
+                self.state('zoomed')
+            except:
+                self.attributes('-zoomed', True)
+            
+            # Windows fallback using ctypes to force maximize (helps in some environments)
+            try:
+                import ctypes
+                SW_MAXIMIZE = 3
+                hwnd = int(self.winfo_id())
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, SW_MAXIMIZE)
+                    try:
+                        ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
+            self.deiconify() # Now show it
+            self.lift()
+            self.focus_force()
         except Exception as e:
-            log.error(f"Error updating timer: {e}")
-            # Still try to update
-            self.after(1000, self.update_timer)
-    
+            print(f"Maximize error: {e}")
+            self.deiconify()
+
     def stop_emergency(self):
-        """Stop emergency mode"""
+        # Prompt for PIN (4 digits) before stopping emergency
         try:
+            from persistence import verify_pin
+            from config import config_manager
+            from tkinter import messagebox
+
+            settings = config_manager.get_settings()
+            emergency_cfg = settings.get('emergency', {})
+            salt = emergency_cfg.get('emergency_shortcut_pin_salt')
+            hashed = emergency_cfg.get('emergency_shortcut_pin_hash')
+
+            if salt and hashed:
+                pin = simpledialog.askstring("Confirm PIN", "Enter Emergency PIN to stop emergency:", show='*', parent=self)
+                if not pin:
+                    messagebox.showinfo("Cancelled", "Emergency stop cancelled.", parent=self)
+                    return
+                if not (pin.isdigit() and len(pin) == 4):
+                    messagebox.showerror("Invalid PIN", "PIN must be exactly 4 digits.", parent=self)
+                    return
+                if not verify_pin(pin, salt, hashed):
+                    messagebox.showerror("Incorrect PIN", "The PIN entered is incorrect.", parent=self)
+                    return
+            else:
+                # No PIN configured - ask for confirmation
+                if not messagebox.askyesno("Stop Emergency", "No Emergency PIN configured. Stop emergency?", parent=self):
+                    return
+
             from emergency_alert_manager import stop_emergency_mode
-            from tkinter import messagebox
-            
-            # Ask for confirmation
-            result = messagebox.askyesno(
-                "Stop Emergency Mode?",
-                "Are you sure you want to stop emergency mode?\n\n"
-                "This will:\n"
-                "• Stop all data collection\n"
-                "• Send final data update\n"
-                "• Restore normal monitoring settings",
-                icon="warning"
-            )
-            
-            if result:
+            try:
+                log.info("EmergencyStatusWindow: calling stop_emergency_mode()")
                 stop_emergency_mode()
-                messagebox.showinfo("Emergency Stopped", "Emergency mode has been stopped successfully.")
+                log.info("EmergencyStatusWindow: stop_emergency_mode() returned")
+            except Exception as stop_err:
+                log.error(f"EmergencyStatusWindow: error calling stop_emergency_mode: {stop_err}")
+                try:
+                    messagebox.showerror("Error", f"Failed to stop emergency: {stop_err}", parent=self)
+                except Exception:
+                    pass
+            try:
                 self.destroy()
+            except Exception:
+                pass
         except Exception as e:
-            log.error(f"Error stopping emergency: {e}")
-            from tkinter import messagebox
-            messagebox.showerror("Error", f"Failed to stop emergency mode: {e}")
-    
+            try:
+                messagebox.showerror("Error", f"Failed to stop emergency: {e}", parent=self)
+            except Exception:
+                pass
+
     def on_close(self):
-        """Handle window close attempt"""
-        from tkinter import messagebox
-        result = messagebox.askyesno(
-            "Emergency Mode Active",
-            "Emergency mode is still active!\n\n"
-            "You cannot close this window while emergency mode is active.\n"
-            "Please click 'STOP EMERGENCY MODE' to stop it first.",
-            icon="warning"
-        )
-        # Don't close the window - keep it open
+        # Disable closing via the X button while emergency is active
+        try:
+            messagebox.showwarning("Emergency Active", "Emergency mode is active. Use the STOP button to stop emergency.", parent=self)
+        except Exception:
+            pass
+
+    def update_grace_period(self):
+        try:
+            if self.grace_seconds > 0:
+                self.grace_label.config(text=f"Grace period: {self.grace_seconds}s")
+                self.grace_seconds -= 1
+                self.after(1000, self.update_grace_period)
+            else:
+                self.grace_label.config(text="Grace period ended")
+        except Exception:
+            pass
+
 
 # Global reference to the status window
 _emergency_status_window = None
 
 def show_emergency_status_window(parent):
-    """Show the emergency status window"""
+    """Always create a fresh EmergencyStatusWindow and show it."""
     global _emergency_status_window
     try:
-        if _emergency_status_window is None or not _emergency_status_window.winfo_exists():
-            _emergency_status_window = EmergencyStatusWindow(parent)
-            log.info("Emergency status window opened")
-        else:
-            # Window already exists, just bring it to front
-            _emergency_status_window.lift()
-            _emergency_status_window.focus_force()
+        # Destroy any existing window to ensure fresh UI
+        if _emergency_status_window and _emergency_status_window.winfo_exists():
+            try:
+                _emergency_status_window.destroy()
+            except Exception:
+                pass
+            _emergency_status_window = None
+
+        _emergency_status_window = EmergencyStatusWindow(parent)
+        _emergency_status_window.protocol('WM_DELETE_WINDOW', _emergency_status_window.on_close)
+        return _emergency_status_window
     except Exception as e:
-        log.error(f"Error showing emergency status window: {e}")
+        print(f"Error showing emergency status window: {e}")
+
 
 def close_emergency_status_window():
-    """Close the emergency status window"""
     global _emergency_status_window
     try:
         if _emergency_status_window and _emergency_status_window.winfo_exists():
             _emergency_status_window.destroy()
             _emergency_status_window = None
-            log.info("Emergency status window closed")
     except Exception as e:
-        log.error(f"Error closing emergency status window: {e}")
-
+        print(f"Error closing emergency status window: {e}")

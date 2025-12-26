@@ -11,9 +11,9 @@ class GracePeriodWindow(tk.Toplevel):
         super().__init__(parent)
         self.title("Emergency Alert")
         self.geometry("400x250")
-        self.transient(parent)
-        self.grab_set()
-        self.resizable(False, False)
+        # Allow this window to be minimized/maximized independently
+        # Do not set transient or grab so it can be minimized to taskbar
+        self.resizable(True, True)
         
         self.on_cancel_callback = on_cancel
         self.on_confirm_callback = on_confirm
@@ -22,6 +22,16 @@ class GracePeriodWindow(tk.Toplevel):
         
         # Style - Dark background for emergency alert
         self.configure(bg="#1a1a1a")
+        # Small in-window controls for minimize / maximize
+        self._is_maximized = False
+        header_frame = tk.Frame(self, bg="#1a1a1a")
+        header_frame.pack(fill="x", side="top", anchor="ne")
+        # Minimize button
+        self.btn_minimize = tk.Button(header_frame, text="_", width=3, command=self.iconify, bg="#1a1a1a", fg="white", bd=0)
+        self.btn_minimize.pack(side="right", padx=(0,4), pady=4)
+        # Maximize / Restore toggle
+        self.btn_maximize = tk.Button(header_frame, text="▢", width=3, command=self.toggle_maximize, bg="#1a1a1a", fg="white", bd=0)
+        self.btn_maximize.pack(side="right", padx=(0,4), pady=4)
         style = ttk.Style()
         style.configure("Emergency.TLabel", font=("Arial", 16), foreground="white", background="#1a1a1a")
         style.configure("Countdown.TLabel", font=("Arial", 48, "bold"), foreground="#FF4444", background="#1a1a1a")
@@ -122,3 +132,33 @@ class GracePeriodWindow(tk.Toplevel):
     def close_window(self):
         """Close the grace period window"""
         self.destroy()
+
+    def toggle_maximize(self):
+        """Toggle between normal and maximized window states."""
+        try:
+            if getattr(self, "_is_maximized", False):
+                try:
+                    self.state('normal')
+                except Exception:
+                    # Fallback: restore to a sensible size
+                    self.geometry("400x250")
+                self._is_maximized = False
+                try:
+                    self.btn_maximize.config(text="▢")
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.state('zoomed')
+                except Exception:
+                    # Fallback to manual full-screen geometry
+                    w = self.winfo_screenwidth()
+                    h = self.winfo_screenheight()
+                    self.geometry(f"{w}x{h}+0+0")
+                self._is_maximized = True
+                try:
+                    self.btn_maximize.config(text="❐")
+                except Exception:
+                    pass
+        except Exception as e:
+            log.debug(f"Error toggling maximize on grace window: {e}")

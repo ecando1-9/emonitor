@@ -42,30 +42,58 @@ def send_alert_to_supabase():
         
         # Show the emergency status window (persistent window with cancel button)
         try:
-            import sys
+            import tkinter as tk
             from ui.emergency_status_ui import show_emergency_status_window
-            main_window = sys.modules.get('ui.main_window')
-            if main_window and hasattr(main_window, 'main_app'):
-                root = main_window.main_app.winfo_toplevel()
+            # Prefer the Tk default root if available
+            root = None
+            try:
+                root = tk._default_root
+            except Exception:
+                root = None
+            if not root:
+                # Fallback: try to find any Toplevel in tkinter
+                try:
+                    import tkinter as _tk
+                    if _tk._default_root:
+                        root = _tk._default_root
+                except Exception:
+                    root = None
+            if root:
                 show_emergency_status_window(root)
                 log.info("Emergency status window displayed")
+            else:
+                log.warning("Could not determine Tk root to show emergency status window")
         except Exception as window_error:
             log.warning(f"Could not show emergency status window: {window_error}")
         
         # Update dashboard button state immediately after emergency is triggered
         try:
-            import sys
-            main_window = sys.modules.get('ui.main_window')
-            if main_window and hasattr(main_window, 'main_app'):
-                from ui.dashboard_ui import DashboardFrame
-                if DashboardFrame in main_window.main_app.frames:
-                    dashboard_frame = main_window.main_app.frames[DashboardFrame]
-                    if hasattr(dashboard_frame, 'update_emergency_button_state'):
-                        # Update immediately and keep checking
-                        dashboard_frame.after(100, dashboard_frame.update_emergency_button_state)
-                        dashboard_frame.after(500, dashboard_frame.update_emergency_button_state)
-                        dashboard_frame.after(1000, dashboard_frame.update_emergency_button_state)
-                        log.info("Dashboard cancel button should now be visible")
+            import tkinter as tk
+            from ui.dashboard_ui import DashboardFrame
+            root = getattr(tk, '_default_root', None)
+            if root and hasattr(root, 'frames'):
+                frames = getattr(root, 'frames')
+                dashboard_frame = frames.get(DashboardFrame)
+                if dashboard_frame and hasattr(dashboard_frame, 'update_emergency_button_state'):
+                    dashboard_frame.after(100, dashboard_frame.update_emergency_button_state)
+                    dashboard_frame.after(500, dashboard_frame.update_emergency_button_state)
+                    dashboard_frame.after(1000, dashboard_frame.update_emergency_button_state)
+                    log.info("Dashboard cancel button should now be visible")
+            else:
+                # Try scanning any existing Toplevel windows for the dashboard frame
+                try:
+                    import tkinter as _tk
+                    root2 = _tk._default_root
+                    if root2 and hasattr(root2, 'frames'):
+                        frames = getattr(root2, 'frames')
+                        dashboard_frame = frames.get(DashboardFrame)
+                        if dashboard_frame and hasattr(dashboard_frame, 'update_emergency_button_state'):
+                            dashboard_frame.after(100, dashboard_frame.update_emergency_button_state)
+                            dashboard_frame.after(500, dashboard_frame.update_emergency_button_state)
+                            dashboard_frame.after(1000, dashboard_frame.update_emergency_button_state)
+                            log.info("Dashboard cancel button should now be visible (fallback)")
+                except Exception:
+                    log.debug("Could not find dashboard frame to update")
         except Exception as update_error:
             log.debug(f"Could not update dashboard button state immediately: {update_error}")
     except Exception as e:
@@ -148,6 +176,35 @@ def cancel_alert():
         grace_period_window.destroy()
         grace_period_window = None
     alert_in_progress.clear()
+    # Even though the user cancelled, gather the data we have so far
+    # and send a cancellation summary to admins/user/emergency contacts.
+    def _notify_cancelled():
+        try:
+            from emergency_alert_manager import get_emergency_data, send_emergency_alert_with_retry, send_emails_to_emergency_contacts
+            data = get_emergency_data()
+            data['canceled_by'] = 'user'
+            data['canceled_at'] = __import__('datetime').datetime.now().isoformat()
+
+            # Send a summary email to admin/user/emergency (no DB record)
+            try:
+                send_emergency_alert_with_retry(data, alert_id=None)
+                log.info("Sent cancellation summary email to configured recipients")
+            except Exception as e:
+                log.warning(f"Failed to send cancellation summary email: {e}")
+
+            # Also notify emergency contacts with filtered data according to preferences
+            try:
+                contacts_result = send_emails_to_emergency_contacts(data)
+                log.info(f"Cancellation: emergency contacts notification result: {contacts_result}")
+            except Exception as e:
+                log.warning(f"Failed to notify emergency contacts on cancellation: {e}")
+        except Exception as e:
+            log.error(f"Error while sending cancellation summary: {e}")
+
+    try:
+        threading.Thread(target=_notify_cancelled, daemon=True).start()
+    except Exception as e:
+        log.debug(f"Could not start cancellation notify thread: {e}")
 
 class HotkeyManager:
     def __init__(self, main_window_controller):
