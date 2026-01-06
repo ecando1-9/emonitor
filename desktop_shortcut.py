@@ -296,29 +296,41 @@ def create_emergency_shortcut(custom_icon_path=None, icon_type="generated"):
         shortcut_path = os.path.join(desktop_path, "Emergency Alert.lnk")
         
         # Get the script directory
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # Prefer VBScript wrapper (completely silent), fallback to batch file
-        vbs_file = os.path.join(script_dir, "start_emergency_alert.vbs")
-        bat_file = os.path.join(script_dir, "start_emergency_alert.bat")
-        trigger_script = os.path.join(script_dir, "trigger_emergency.py")
-        
-        # Determine which file to use
-        if os.path.exists(vbs_file):
-            target_file = vbs_file
-            log.info("Using VBScript wrapper for completely silent execution")
-        elif os.path.exists(bat_file):
-            target_file = bat_file
-            log.info("Using batch file for emergency alert")
+        if getattr(sys, 'frozen', False):
+             script_dir = os.path.dirname(sys.executable)
         else:
-            log.error("Emergency alert script not found")
-            log.debug(f"Checked paths for alert script: {vbs_file}, {bat_file}")
-            return False
+             script_dir = os.path.dirname(os.path.abspath(__file__))
         
-        if not os.path.exists(trigger_script):
-            log.warning("trigger_emergency.py not found in application directory")
-            log.debug(f"Checked trigger script path: {trigger_script}")
-            # Continue anyway - the batch/vbs will handle the error
+        if getattr(sys, 'frozen', False):
+            # APP IS FROZEN (EXE)
+            # Create shortcut to the EXE itself with --emergency argument
+            target_path = sys.executable
+            arguments = "--emergency"
+            log.info(f"Creating shortcut to EXE: {target_path} {arguments}")
+        else:
+            # APP IS RUNNING AS SCRIPT (DEV MODE)
+            # Prefer VBScript wrapper (completely silent), fallback to batch file
+            vbs_file = os.path.join(script_dir, "start_emergency_alert.vbs")
+            bat_file = os.path.join(script_dir, "start_emergency_alert.bat")
+            trigger_script = os.path.join(script_dir, "trigger_emergency.py")
+            arguments = ""
+
+            # Determine which file to use
+            if os.path.exists(vbs_file):
+                target_path = vbs_file
+                log.info("Using VBScript wrapper for completely silent execution")
+            elif os.path.exists(bat_file):
+                target_path = bat_file
+                log.info("Using batch file for emergency alert")
+            else:
+                log.error("Emergency alert script not found")
+                log.debug(f"Checked paths for alert script: {vbs_file}, {bat_file}")
+                return False
+            
+            if not os.path.exists(trigger_script):
+                log.warning("trigger_emergency.py not found in application directory")
+                log.debug(f"Checked trigger script path: {trigger_script}")
+                # Continue anyway - the batch/vbs will handle the error
         
         # Determine icon path
         icon_path = None
@@ -334,24 +346,63 @@ def create_emergency_shortcut(custom_icon_path=None, icon_type="generated"):
         
         if not icon_path:
             # --- Check for User Provided Logo ---
-            user_logo_ico = os.path.join(script_dir, "emergency_logo.ico")
-            user_logo_png = os.path.join(script_dir, "emergency_logo.png")
+            user_logo_ico_name = "emergency_logo.ico"
+            user_logo_png_name = "emergency_logo.png"
             
-            if os.path.exists(user_logo_ico):
-                icon_path = user_logo_ico
-                log.info(f"Using user-provided emergency logo (ico): {icon_path}")
-            elif os.path.exists(user_logo_png):
-                log.info(f"Found user-provided emergency logo (png): {user_logo_png}. Converting to ICO...")
-                try:
-                    from PIL import Image
-                    img = Image.open(user_logo_png)
-                    icon_path = os.path.join(script_dir, "emergency_logo_converted.ico")
-                    img.save(icon_path, format="ICO", sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])
-                    log.info(f"Converted PNG to ICO: {icon_path}")
-                except Exception as e:
-                    log.error(f"Failed to convert user PNG to ICO: {e}")
-                    # Try to use PNG anyway (might failing on some windows versions) or fall back
-                    # icon_path = user_logo_png 
+            # Paths to check (Bundle first, then script dir)
+            paths_to_check = []
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                paths_to_check.append(sys._MEIPASS)
+            paths_to_check.append(script_dir)
+            
+            for check_dir in paths_to_check:
+                ico_path = os.path.join(check_dir, user_logo_ico_name)
+                png_path = os.path.join(check_dir, user_logo_png_name)
+                
+                if os.path.exists(ico_path):
+                    icon_path = ico_path
+                    log.info(f"Using user-provided emergency logo (ico): {icon_path}")
+                    break
+                elif os.path.exists(png_path):
+                    log.info(f"Found user-provided emergency logo (png): {png_path}. Converting to ICO...")
+                    try:
+                        from PIL import Image
+                        img = Image.open(png_path)
+                        # Save converted icon to app_data or temp, NOT Program Files (might be read-only)
+                        # But wait, desktop shortcut needs a permanent path.
+                        # If we are in _MEIPASS, we must extract it to a permanent place.
+                        
+                        target_ico_name = "emergency_logo_converted.ico"
+                        if getattr(sys, 'frozen', False):
+                             # Need a stable path: Config/App_Data dir
+                             from config import DATA_DIR
+                             icon_path = os.path.join(DATA_DIR, target_ico_name)
+                        else:
+                             icon_path = os.path.join(script_dir, target_ico_name)
+
+                        img.save(icon_path, format="ICO", sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])
+                        log.info(f"Converted PNG to ICO: {icon_path}")
+                        break
+                    except Exception as e:
+                        log.error(f"Failed to convert user PNG to ICO: {e}")
+                        # Keep looking or fail
+            
+            # If we simply found an existing ICO in a temp folder (_MEIPASS), we should probably copy it out
+            # because _MEIPASS is deleted when app closes, breaking the shortcut icon.
+            if icon_path and hasattr(sys, '_MEIPASS') and sys._MEIPASS in icon_path:
+                 try:
+                     from config import DATA_DIR
+                     if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
+                     new_icon_path = os.path.join(DATA_DIR, os.path.basename(icon_path))
+                     import shutil
+                     shutil.copy2(icon_path, new_icon_path)
+                     icon_path = new_icon_path
+                     log.info(f"Copied temp icon to stable path: {icon_path}")
+                 except Exception as copy_err:
+                     log.warning(f"Failed to copy icon from temp bundle: {copy_err}")
+                     # Shortcut will break on restart if we use temp path
+            
+            if not icon_path: 
             
             if not icon_path:
                 # Try to create/use generated emergency icon
@@ -369,7 +420,8 @@ def create_emergency_shortcut(custom_icon_path=None, icon_type="generated"):
         
         shell = win32com.client.Dispatch("WScript.Shell")
         shortcut = shell.CreateShortCut(shortcut_path)
-        shortcut.Targetpath = target_file
+        shortcut.Targetpath = target_path
+        shortcut.Arguments = arguments
         shortcut.WorkingDirectory = script_dir
         shortcut.Description = "Emergency Alert - eMonitor - Completely silent execution"
         shortcut.IconLocation = icon_path

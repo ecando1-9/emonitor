@@ -14,7 +14,8 @@ class FeedbackWindow(tk.Toplevel):
         super().__init__(parent)
         self.title("Send Feedback to Admin")
         self.geometry("450x400")
-        self.transient(parent) # Keep this window on top
+        # Allow resizing and maximizing
+        self.resizable(True, True)
         self.grab_set() # Modal behavior
         
         # --- !! THIS IS THE FIX !! ---
@@ -127,7 +128,16 @@ class FeedbackWindow(tk.Toplevel):
                 return
 
             sender_config = creds_result.get("data")
-            log_path = "emoniter.log" if include_log else None
+            
+            # FIX: Use absolute path from DATA_DIR
+            from config import DATA_DIR
+            import os
+            real_log_path = os.path.join(DATA_DIR, "emoniter.log")
+            
+            log_path = real_log_path if include_log and os.path.exists(real_log_path) else None
+            
+            if include_log and not log_path:
+                log.warning(f"Could not find log file at {real_log_path} to attach.")
             
             success = send_feedback_email(sender_config, admin_email, user_email, message, log_path)
             

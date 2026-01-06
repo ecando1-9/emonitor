@@ -1722,6 +1722,11 @@ def trigger_emergency_alert(activation_method="button"):
                     log.error(f"❌ Failed to create alert in Supabase: {supabase_error}")
                     import traceback
                     log.error(traceback.format_exc())
+                    # FALLBACK: Generate local ID and continue!
+                    import uuid
+                    alert_id = f"offline_{uuid.uuid4().hex[:12]}"
+                    database_success = False
+                    log.info(f"Generated OFFLINE Alert ID due to database error: {alert_id}")
             else:
                 log.warning("User not logged in - will work in OFFLINE MODE (emails only, no database)")
                 # Generate a local alert ID for offline mode

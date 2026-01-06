@@ -50,6 +50,8 @@ pyinstaller --noconsole --onefile ^
     --name="eMonitor" ^
     --icon="icon.ico" ^
     --add-data "icon.png;." ^
+    --add-data ".env;." ^
+    --add-data "emergency_logo.png;." ^
     --hidden-import="pystray" ^
     --hidden-import="PIL" ^
     --hidden-import="cv2" ^

@@ -3,7 +3,29 @@ import os
 from logger_setup import log
 
 # --- Centralized Data Directory ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# --- Centralized Data Directory ---
+# Professional Data Storage: Use %APPDATA% (Hidden & Persistent)
+import sys
+if sys.platform == "win32":
+    app_data_roaming = os.getenv('APPDATA')
+    if app_data_roaming:
+        BASE_DIR = os.path.join(app_data_roaming, "eMonitor")
+    else:
+        # Fallback if APPDATA env var is missing
+        BASE_DIR = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "eMonitor")
+else:
+    # Linux/Mac fallback (for dev)
+    BASE_DIR = os.path.join(os.path.expanduser("~"), ".eMonitor")
+
+if not os.path.exists(BASE_DIR):
+    try:
+        os.makedirs(BASE_DIR)
+    except Exception as e:
+        # Emergency fallback to temp if permissions fail
+        import tempfile
+        BASE_DIR = os.path.join(tempfile.gettempdir(), "eMonitor")
+        if not os.path.exists(BASE_DIR): os.makedirs(BASE_DIR)
+
 DATA_DIR = os.path.join(BASE_DIR, "app_data")
 
 # Create data directory if it doesn't exist

@@ -1,1 +1,31 @@
-[]
+[
+  {
+    "data": {
+      "timestamp": "2026-01-06T21:41:54.107540",
+      "device_id": "11e55f5eb20a8e2256bc131786decdac65d834896c08dc1ee864515d8c9d1d38",
+      "user_email": "yuva7@gmail.com",
+      "user_name": "wew",
+      "location": {
+        "precise_gps_attempt": {
+          "type": "Permission Denied",
+          "error": "Windows Location Permission is OFF",
+          "message": "Please enable location services in Windows Settings > Privacy > Location"
+        },
+        "ip_geolocation_attempt": "API request failed",
+        "status": "Both location methods failed"
+      },
+      "recent_activity": "eMonitor",
+      "device_name": "My-Computer",
+      "user_phone": "weww",
+      "emergency_email": "ww",
+      "emergency_contacts": [
+        {
+          "name": "w",
+          "phone": "ww"
+        }
+      ]
+    },
+    "queued_at": "2026-01-06T21:41:58.728796",
+    "retry_count": 0
+  }
+]

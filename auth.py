@@ -4,10 +4,24 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from logger_setup import log
 from device_fingerprint import get_device_hash
-from config import config_manager
+from config import config_manager, BASE_DIR
 from persistence import hash_pin, verify_pin
+import sys
 
-load_dotenv()
+# Determine path to .env file
+# 1. Check if we are running as a bundle (PyInstaller) and file is in temp folder
+if hasattr(sys, '_MEIPASS'):
+    bundled_env = os.path.join(sys._MEIPASS, ".env")
+    if os.path.exists(bundled_env):
+        env_path = bundled_env
+    else:
+        # Fallback to external .env near exe
+        env_path = os.path.join(BASE_DIR, ".env")
+else:
+    # Dev mode
+    env_path = os.path.join(BASE_DIR, ".env")
+
+load_dotenv(env_path)
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_ANON_KEY")
 if not url or not key:
@@ -51,9 +65,19 @@ class AuthService:
             })
             
             if res.user:
-                log.info(f"Auth signup successful for {email}. Creating user record...")
+                log.info(f"Auth signup successful for {email}. Attempting to log in to create records...")
                 
-                # Step 2: Create user record in public.users table
+                # Step 2: IMMEDATELY Log in to satisfy Row Level Security (RLS)
+                # We must be authenticated to insert into 'users' and 'subscriptions' tables.
+                login_result = self.sign_in(email, password)
+                
+                if not login_result.get("success"):
+                     log.warning(f"Signup succeeded but immediate login failed: {login_result.get('error')}")
+                     return login_result
+                
+                # We are now Logged In (self.client has the session token)
+                
+                # Step 3: Create user record in public.users table
                 try:
                     user_data = {
                         "id": res.user.id,
@@ -62,42 +86,32 @@ class AuthService:
                         "created_at": "now()",
                         "updated_at": "now()"
                     }
-                    
                     # Insert user record
-                    insert_result = self.client.table("users").insert(user_data).execute()
-                    log.info(f"User record created successfully in public.users table")
-                    
+                    self.client.table("users").insert(user_data).execute()
+                    log.info(f"User record created successfully")
                 except Exception as db_error:
                     log.error(f"Failed to create user record: {db_error}")
-                    log.warning("Continuing with login despite user record creation failure")
+                    # Continue - trigger might handle it or it might exist
                 
-                # Step 3: Check app config for auto-trial creation
+                # Step 4: Create Free Trial (Now that we are authenticated)
                 try:
                     # Fetch app config settings
-                    auto_trial_config = self.client.table("app_config").select("value").eq("key", "auto_create_trial").execute()
-                    trial_days_config = self.client.table("app_config").select("value").eq("key", "free_trial_days").execute()
+                    config_response = self.client.from_("app_config").select("key, value").in_("key", ["auto_create_trial", "free_trial_days"]).execute()
+                    config_map = {item["key"]: item["value"] for item in config_response.data}
                     
-                    # Check if auto-trial is enabled
-                    auto_create = True  # Default
-                    if auto_trial_config.data and len(auto_trial_config.data) > 0:
-                        value = auto_trial_config.data[0].get("value", "true").lower()
-                        auto_create = value in ["true", "1", "yes", "enabled"]
+                    auto_create_val = config_map.get("auto_create_trial", "true").lower()
+                    auto_create = auto_create_val in ["true", "1", "yes", "enabled"]
                     
-                    # Get trial days
-                    trial_days = 7  # Default
-                    if trial_days_config.data and len(trial_days_config.data) > 0:
-                        try:
-                            trial_days = int(trial_days_config.data[0].get("value", "7"))
-                        except:
-                            trial_days = 7
+                    trial_days_val = config_map.get("free_trial_days", "7")
+                    try:
+                        trial_days = int(trial_days_val)
+                    except ValueError:
+                        trial_days = 7
                     
-                    log.info(f"App config: auto_create_trial={auto_create}, trial_days={trial_days}")
-                    
-                    # Create trial if enabled
                     if auto_create:
-                        from datetime import datetime, timedelta
-                        
-                        trial_end = datetime.now() + timedelta(days=trial_days)
+                        from datetime import timezone, timedelta
+                        now_utc = datetime.now(timezone.utc)
+                        trial_end = now_utc + timedelta(days=trial_days)
                         
                         subscription_data = {
                             "user_id": res.user.id,
@@ -105,21 +119,32 @@ class AuthService:
                             "status": "trialing",
                             "trial_ends_at": trial_end.isoformat(),
                             "device_hash": device_hash,
-                            "created_at": "now()",
-                            "updated_at": "now()"
+                            "created_at": now_utc.isoformat(),
+                            "updated_at": now_utc.isoformat()
                         }
                         
-                        sub_result = self.client.table("subscriptions").insert(subscription_data).execute()
-                        log.info(f"✅ Free trial created: {trial_days} days (ends {trial_end.strftime('%Y-%m-%d')})")
+                        self.client.table("subscriptions").insert(subscription_data).execute()
+                        log.info(f"✅ Free trial created: {trial_days} days")
+                        
+                        # Patch the login result with the new subscription
+                        login_result["subscription"] = subscription_data
+                        
+                        # Apply premium features immediately
+                        settings = config_manager.get_settings()
+                        settings["allowed_features"] = [
+                                "SCREENSHOT", "TELEMETRY", "ACTIVITY_SUMMARY", 
+                                "ADVANCED_ACTIVITY", "TYPING_INTENSITY", 
+                                "SCREEN_RECORD", "CAMERA", "MICROPHONE", "REPORT_SCHEDULE"
+                        ]
+                        config_manager.update_settings(settings)
+                        
                     else:
-                        log.info("Auto-trial disabled by admin. User will need manual subscription assignment.")
+                        log.info("Auto-trial disabled by admin.")
                         
                 except Exception as settings_error:
-                    log.warning(f"Could not read app config or create trial: {settings_error}")
-                    log.info("User can still login. Subscription can be assigned via admin panel.")
+                    log.warning(f"Trial creation failed: {settings_error}")
                 
-                # Step 4: Sign in to get session
-                return self.sign_in(email, password)
+                return login_result
                 
             if res.api_error:
                 log.error(f"Sign up failed: {res.api_error.message}")

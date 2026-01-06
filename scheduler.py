@@ -330,8 +330,11 @@ def task_bundle_and_send_report():
 def task_send_log_file():
     log.info("Scheduler: Running task_send_log_file...")
     admin_email = config_manager.get_settings()["admin"]["admin_support_email"]
-    log_path = 'emoniter.log'
-    if not os.path.exists(log_path): return
+    # Fix: Use correct DATA_DIR path
+    log_path = os.path.join(DATA_DIR, 'emoniter.log')
+    if not os.path.exists(log_path): 
+        log.warning(f"Scheduler: Log file not found at {log_path}")
+        return
     if not admin_email or "your-support-email" in admin_email: return
     if not auth_service.current_user: return
     sender_creds_result = auth_service.get_sender_assignment()

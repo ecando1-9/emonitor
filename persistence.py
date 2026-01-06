@@ -90,10 +90,15 @@ def create_desktop_shortcut(on=True):
 
 # Startup Management
 def get_run_command():
-    python_exe_path = sys.executable
-    script_path = os.path.abspath("main.py")
-    # Add --minimized flag so app starts hidden to tray on boot
-    return f'"{python_exe_path}" "{script_path}" --minimized'
+    if getattr(sys, 'frozen', False):
+        # Running as compiled .exe
+        exe_path = sys.executable
+        return f'"{exe_path}" --minimized'
+    else:
+        # Running as python script
+        python_exe_path = sys.executable
+        script_path = os.path.abspath("main.py")
+        return f'"{python_exe_path}" "{script_path}" --minimized'
 
 def set_startup(on=True):
     if "win" not in sys.platform:

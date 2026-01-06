@@ -151,10 +151,25 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         err_msg = f"CRITICAL CRASH:\n{traceback.format_exc()}"
-        print(err_msg, file=sys.stderr)
+    except Exception as e:
+        import traceback
+        err_msg = f"CRITICAL CRASH:\n{traceback.format_exc()}"
+        
+        # Safe print to stderr if it exists
+        if sys.stderr is not None:
+             print(err_msg, file=sys.stderr)
+             
+        # Write to crash file
         with open("crash_error.txt", "w") as f:
             f.write(err_msg)
-        input("App Crashed. Press Enter to exit...")
+            
+        # Show graphical error message since we have no console
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, f"Application Crashed!\nSee crash_error.txt for details.\n\nError: {e}", "eMonitor Crash", 0x10)
+        except:
+            pass
+        # Do not use input() here as it causes EOFError in noconsole mode
     log.info("Application shut down.")
     if "--minimized" in sys.argv:
         log.info("Starting in minimized mode (auto-start on boot)")
