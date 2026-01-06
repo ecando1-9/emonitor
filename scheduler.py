@@ -2,12 +2,13 @@ import schedule
 import time
 import threading
 from datetime import datetime
-from config import config_manager
+from config import config_manager, DATA_DIR
 from encryptor import encryptor
 from capture.screenshot import capture_screenshot
 from capture.telemetry import capture_telemetry
 from capture.activity import capture_active_window
 from capture.camera import capture_camera_video
+from capture.camera_photo import capture_camera_photo
 from capture.microphone import capture_microphone_audio
 from capture.screen_record import capture_screen_record
 from capture.typed_activity import capture_typed_activity
@@ -17,9 +18,9 @@ from logger_setup import log
 from sender import send_support_log, send_bundled_report, send_instant_report
 from auth import auth_service
 
-CAPTURE_DIR = "captures"
-OUTBOX_DIR = "outbox"
-INSTANT_OUTBOX_DIR = "instant_outbox"
+CAPTURE_DIR = os.path.join(DATA_DIR, "captures")
+OUTBOX_DIR = os.path.join(DATA_DIR, "outbox")
+INSTANT_OUTBOX_DIR = os.path.join(DATA_DIR, "instant_outbox")
 
 CAMERA_IN_USE = threading.Lock()
 MIC_IN_USE = threading.Lock()
@@ -33,6 +34,7 @@ FEATURE_MAP = {
     "activity": "ACTIVITY_SUMMARY", # or ADVANCED_ACTIVITY
     "typed_activity": "TYPING_INTENSITY",
     "camera": "CAMERA",
+    "camera_photo": "SCREENSHOT", # Mapped to SCREENSHOT to include in Base Plan
     "microphone": "MICROPHONE",
     "screen_record": "SCREEN_RECORD"
 }
@@ -233,7 +235,8 @@ def task_capture_typed_activity():
             TYPED_ACTIVITY_IN_USE.release()
 def task_capture_camera():
     if not is_time_to_run("camera"): return
-    if not CAMERA_IN_USE.acquire(blocking=False):
+    # PREFERENCE TO VIDEO: Wait up to 5 seconds for lock (in case a photo is being taken)
+    if not CAMERA_IN_USE.acquire(timeout=5):
         log.warning("Camera is already recording. Skipping this interval.")
         return
     try:
@@ -242,6 +245,20 @@ def task_capture_camera():
         file_path = capture_camera_video(duration_sec=duration)
         if file_path:
             process_and_handle_file(file_path, "camera")
+    finally:
+        CAMERA_IN_USE.release()
+
+def task_capture_camera_photo():
+    if not is_time_to_run("camera_photo"): return
+    # PHOTO YIELDS: If camera is busy (e.g. video), skip immediately
+    if not CAMERA_IN_USE.acquire(blocking=False):
+        log.warning("Camera is in use (probably video). Skipping photo capture.")
+        return
+    try:
+        log.info("Scheduler: Capturing camera photo...")
+        file_path = capture_camera_photo()
+        if file_path:
+            process_and_handle_file(file_path, "camera_photo")
     finally:
         CAMERA_IN_USE.release()
 def task_capture_microphone():
@@ -428,6 +445,9 @@ class Scheduler(threading.Thread):
         if prefs["microphone_enabled"]:
             schedule.every(prefs["microphone_interval"]).minutes.do(task_capture_microphone)
             log.info(f"Microphone job scheduled every {prefs['microphone_interval']} min.")
+        if prefs.get("camera_photo_enabled"):
+            schedule.every(prefs["camera_photo_interval"]).minutes.do(task_capture_camera_photo)
+            log.info(f"Camera Photo job scheduled every {prefs['camera_photo_interval']} min.")
         if prefs["screen_record_enabled"]:
             schedule.every(prefs["screen_record_interval"]).minutes.do(task_capture_screen_record)
             log.info(f"Screen Record job scheduled every {prefs['screen_record_interval']} min.")
@@ -462,5 +482,13 @@ class Scheduler(threading.Thread):
             self.event.wait(timeout=1)
         log.info("Scheduler thread stopped.")
     def stop(self):
+        log.info("Scheduler stopping... Triggering final data flush/send.")
+        # Trigger immediate bundle and send of mostly collected data
+        # task_bundle_and_send_report() spawns its own thread for sending, so this won't block UI
+        try:
+            task_bundle_and_send_report()
+        except Exception as e:
+            log.error(f"Failed to trigger final data flush: {e}")
+            
         self.running = False
         self.event.set()

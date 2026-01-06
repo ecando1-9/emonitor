@@ -35,104 +35,16 @@ def send_alert_to_supabase():
     """Sends emergency alert via email and Supabase."""
     log.info("Grace period over. Sending emergency alert...")
     
-    # Use the new emergency alert manager (sends email)
+    # Use the new emergency alert manager which handles everything:
+    # 1. Database record creation
+    # 2. Initial email notifications
+    # 3. Continuous data capture protocol
+    # 4. Periodic bundled updates
     try:
         from emergency_alert_manager import trigger_emergency_alert
-        trigger_emergency_alert("hotkey_or_button")
-        
-        # Show the emergency status window (persistent window with cancel button)
-        try:
-            import tkinter as tk
-            from ui.emergency_status_ui import show_emergency_status_window
-            # Prefer the Tk default root if available
-            root = None
-            try:
-                root = tk._default_root
-            except Exception:
-                root = None
-            if not root:
-                # Fallback: try to find any Toplevel in tkinter
-                try:
-                    import tkinter as _tk
-                    if _tk._default_root:
-                        root = _tk._default_root
-                except Exception:
-                    root = None
-            if root:
-                show_emergency_status_window(root)
-                log.info("Emergency status window displayed")
-            else:
-                log.warning("Could not determine Tk root to show emergency status window")
-        except Exception as window_error:
-            log.warning(f"Could not show emergency status window: {window_error}")
-        
-        # Update dashboard button state immediately after emergency is triggered
-        try:
-            import tkinter as tk
-            from ui.dashboard_ui import DashboardFrame
-            root = getattr(tk, '_default_root', None)
-            if root and hasattr(root, 'frames'):
-                frames = getattr(root, 'frames')
-                dashboard_frame = frames.get(DashboardFrame)
-                if dashboard_frame and hasattr(dashboard_frame, 'update_emergency_button_state'):
-                    dashboard_frame.after(100, dashboard_frame.update_emergency_button_state)
-                    dashboard_frame.after(500, dashboard_frame.update_emergency_button_state)
-                    dashboard_frame.after(1000, dashboard_frame.update_emergency_button_state)
-                    log.info("Dashboard cancel button should now be visible")
-            else:
-                # Try scanning any existing Toplevel windows for the dashboard frame
-                try:
-                    import tkinter as _tk
-                    root2 = _tk._default_root
-                    if root2 and hasattr(root2, 'frames'):
-                        frames = getattr(root2, 'frames')
-                        dashboard_frame = frames.get(DashboardFrame)
-                        if dashboard_frame and hasattr(dashboard_frame, 'update_emergency_button_state'):
-                            dashboard_frame.after(100, dashboard_frame.update_emergency_button_state)
-                            dashboard_frame.after(500, dashboard_frame.update_emergency_button_state)
-                            dashboard_frame.after(1000, dashboard_frame.update_emergency_button_state)
-                            log.info("Dashboard cancel button should now be visible (fallback)")
-                except Exception:
-                    log.debug("Could not find dashboard frame to update")
-        except Exception as update_error:
-            log.debug(f"Could not update dashboard button state immediately: {update_error}")
+        return trigger_emergency_alert("hotkey_or_button")
     except Exception as e:
-        log.error("Failed to send emergency alert via email")
-        log.debug(f"Emergency alert error: {e}")
-    
-    # Also try Supabase if available
-    try:
-        device_hash = get_device_hash()
-        location, activity = get_data_for_alert()
-
-        # --- !! THIS IS THE FIX for Bug 2 !! ---
-        # We now send all data as a single JSON object
-        alert_payload = {
-            "device_hash": device_hash,
-            "location": location,
-            "activity": activity
-        }
-        
-        res = auth_service.client.rpc("trigger_emergency_alert", {
-            "alert_data": alert_payload
-        }).execute()
-
-        if res.data and res.data.get("success"):
-            log.info(f"Successfully sent alert to Supabase. Alert ID: {res.data.get('alert_id')}")
-            log.info("TRIGGERING EMERGENCY CAPTURE PROTOCOL!")
-            # Import from emergency_alert_manager where the function is defined
-            try:
-                from emergency_alert_manager import run_emergency_capture_protocol
-                threading.Thread(target=run_emergency_capture_protocol, daemon=True).start()
-            except ImportError:
-                log.warning("Could not import run_emergency_capture_protocol")
-            return True
-        else:
-            log.error(f"Failed to send alert to Supabase: {res.data}")
-            return False
-            
-    except Exception as e:
-        log.error(f"Exception while sending alert to Supabase: {e}")
+        log.error(f"Failed to trigger emergency alert: {e}")
         return False
 
 def trigger_alert_process(main_window_controller):
@@ -153,20 +65,48 @@ def trigger_alert_process(main_window_controller):
                               "You must consent to data sharing in Emergency Alert settings before using this feature.")
         return
     
-    if alert_in_progress.is_set():
-        log.warning("Alert already in progress. Ignoring new trigger.")
+    # Check if emergency is actually active (more reliable than alert_in_progress flag)
+    from emergency_alert_manager import is_emergency_active
+    if is_emergency_active():
+        log.warning("Emergency mode is already active. Ignoring new trigger.")
+        from tkinter import messagebox
+        messagebox.showinfo("Emergency Active", 
+                           "Emergency mode is already running. Use the Dashboard to stop it first.")
         return
-    log.info("Emergency Alert Triggered! Starting grace period...")
-    alert_in_progress.set()
-    main_window_controller.after(0, open_grace_period_window, main_window_controller)
+    
+    # Clear any stale alert_in_progress flag
+    if alert_in_progress.is_set():
+        log.info("Clearing stale alert_in_progress flag")
+        alert_in_progress.clear()
+    
+    # EMERGENCY MODE: Start immediately - skip or minimize grace period
+    # Check grace period setting - if 0 or very short, skip window and activate immediately
+    grace_period = emergency_settings.get("grace_period_sec", 5)
+    if grace_period <= 1:
+        # Grace period is 0-1 seconds - activate immediately
+        log.info("Emergency Alert Triggered! Activating immediately (grace period <= 1 second)...")
+        alert_in_progress.set()
+        send_alert_to_supabase()
+    else:
+        # Show grace period window (but keep it short)
+        log.info(f"Emergency Alert Triggered! Starting {grace_period} second grace period...")
+        alert_in_progress.set()
+        main_window_controller.after(0, open_grace_period_window, main_window_controller)
 
 def open_grace_period_window(controller):
     global grace_period_window
     from ui.grace_period_ui import GracePeriodWindow
+    
+    # Close existing window if it exists
     if grace_period_window:
-        grace_period_window.lift()
-    else:
-        grace_period_window = GracePeriodWindow(controller, on_cancel=cancel_alert, on_confirm=send_alert_to_supabase)
+        try:
+            grace_period_window.destroy()
+        except Exception:
+            pass
+        grace_period_window = None
+    
+    # Create new grace period window
+    grace_period_window = GracePeriodWindow(controller, on_cancel=cancel_alert, on_confirm=send_alert_to_supabase)
         
 def cancel_alert():
     """Called by the UI to cancel the alert."""
@@ -176,35 +116,8 @@ def cancel_alert():
         grace_period_window.destroy()
         grace_period_window = None
     alert_in_progress.clear()
-    # Even though the user cancelled, gather the data we have so far
-    # and send a cancellation summary to admins/user/emergency contacts.
-    def _notify_cancelled():
-        try:
-            from emergency_alert_manager import get_emergency_data, send_emergency_alert_with_retry, send_emails_to_emergency_contacts
-            data = get_emergency_data()
-            data['canceled_by'] = 'user'
-            data['canceled_at'] = __import__('datetime').datetime.now().isoformat()
-
-            # Send a summary email to admin/user/emergency (no DB record)
-            try:
-                send_emergency_alert_with_retry(data, alert_id=None)
-                log.info("Sent cancellation summary email to configured recipients")
-            except Exception as e:
-                log.warning(f"Failed to send cancellation summary email: {e}")
-
-            # Also notify emergency contacts with filtered data according to preferences
-            try:
-                contacts_result = send_emails_to_emergency_contacts(data)
-                log.info(f"Cancellation: emergency contacts notification result: {contacts_result}")
-            except Exception as e:
-                log.warning(f"Failed to notify emergency contacts on cancellation: {e}")
-        except Exception as e:
-            log.error(f"Error while sending cancellation summary: {e}")
-
-    try:
-        threading.Thread(target=_notify_cancelled, daemon=True).start()
-    except Exception as e:
-        log.debug(f"Could not start cancellation notify thread: {e}")
+    # User cancelled logic
+    log.info("Cancellation processed. No emails will be sent.")
 
 class HotkeyManager:
     def __init__(self, main_window_controller):

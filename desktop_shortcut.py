@@ -333,8 +333,29 @@ def create_emergency_shortcut(custom_icon_path=None, icon_type="generated"):
                 log.warning(f"Custom icon validation failed: {error_msg}. Using default.")
         
         if not icon_path:
-            # Try to create/use emergency icon
-            icon_path = create_emergency_icon()
+            # --- Check for User Provided Logo ---
+            user_logo_ico = os.path.join(script_dir, "emergency_logo.ico")
+            user_logo_png = os.path.join(script_dir, "emergency_logo.png")
+            
+            if os.path.exists(user_logo_ico):
+                icon_path = user_logo_ico
+                log.info(f"Using user-provided emergency logo (ico): {icon_path}")
+            elif os.path.exists(user_logo_png):
+                log.info(f"Found user-provided emergency logo (png): {user_logo_png}. Converting to ICO...")
+                try:
+                    from PIL import Image
+                    img = Image.open(user_logo_png)
+                    icon_path = os.path.join(script_dir, "emergency_logo_converted.ico")
+                    img.save(icon_path, format="ICO", sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])
+                    log.info(f"Converted PNG to ICO: {icon_path}")
+                except Exception as e:
+                    log.error(f"Failed to convert user PNG to ICO: {e}")
+                    # Try to use PNG anyway (might failing on some windows versions) or fall back
+                    # icon_path = user_logo_png 
+            
+            if not icon_path:
+                # Try to create/use generated emergency icon
+                icon_path = create_emergency_icon()
         
         if not icon_path or not os.path.exists(icon_path):
             log.warning("Custom icon not available, using Windows default alert icon")

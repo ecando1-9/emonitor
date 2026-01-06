@@ -2,6 +2,7 @@ import smtplib
 import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 import threading
 import time
 import json
@@ -12,7 +13,8 @@ from config import config_manager
 from auth import auth_service
 from device_fingerprint import get_device_hash
 from capture.telemetry import get_location_info_data
-from capture.activity import get_active_window_data
+from capture.activity import get_active_window_data, get_comprehensive_activity_summary
+from timezone_utils import get_local_timestamp_iso
 
 EMERGENCY_EMAIL = "ecando976@gmail.com"
 EMERGENCY_QUEUE_FILE = "emergency_queue.json"
@@ -28,6 +30,9 @@ _smtp_warning_throttle = 300  # Only warn once per 5 minutes
 _original_features = None  # Store original features to restore when stopping
 # Callbacks to notify UI about emergency state changes
 _state_change_callbacks = []
+_emergency_file_buffer = []
+_buffer_lock = threading.Lock()
+_current_sender_config = None  # Pin sender for the session
 
 def register_state_change_callback(cb):
     try:
@@ -233,20 +238,34 @@ def format_emergency_email_body(data, for_emergency_contact=False, data_sharing_
             activity = data.get('recent_activity', 'Not available')
             body_parts.append(str(activity) + "\n")
         
+        # Get email interval from settings for display
+        settings = config_manager.get_settings()
+        email_interval_seconds = settings.get("emergency", {}).get("email_interval_seconds", 30)
+        
+        # Format interval for display
+        if email_interval_seconds < 60:
+            interval_text = f"{email_interval_seconds} seconds"
+        elif email_interval_seconds == 60:
+            interval_text = "1 minute"
+        elif email_interval_seconds % 60 == 0:
+            minutes = email_interval_seconds // 60
+            interval_text = f"{minutes} minutes"
+        else:
+            minutes = email_interval_seconds // 60
+            seconds = email_interval_seconds % 60
+            interval_text = f"{minutes}m {seconds}s"
+        
+        # Note: Initial alert doesn't include file attachments
+        # Files will be sent in periodic updates at user-configured interval
+        body_parts.append(f"\n📎 DATA CAPTURE STATUS:\n")
         if data_sharing_prefs.get('screenshot', False):
-            body_parts.append(f"\nScreenshot has been taken and is attached.\n")
-        
-        if data_sharing_prefs.get('logs', False):
-            body_parts.append(f"\nApplication logs have been included in a separate attachment.\n")
-        
+            body_parts.append(f"✓ Screenshots: Will be sent in periodic updates (every {interval_text})\n")
         if data_sharing_prefs.get('camera', False):
-            body_parts.append(f"\nCamera capture has been taken and is attached.\n")
-        
+            body_parts.append(f"✓ Camera: Will be sent in periodic updates (every {interval_text})\n")
         if data_sharing_prefs.get('microphone', False):
-            body_parts.append(f"\nMicrophone audio has been recorded and is attached.\n")
-        
+            body_parts.append(f"✓ Microphone: Will be sent in periodic updates (every {interval_text})\n")
         if data_sharing_prefs.get('screen_record', False):
-            body_parts.append(f"\nA short screen recording has been captured and is attached.\n")
+            body_parts.append(f"✓ Screen Recording: Will be sent in periodic updates (every {interval_text})\n")
         
         body_parts.append("\n--- Emergency Contact Notification ---\n")
         body_parts.append("This is an automated emergency notification. Please contact the user or emergency services if needed.\n")
@@ -257,10 +276,7 @@ def format_emergency_email_body(data, for_emergency_contact=False, data_sharing_
         body = f"""
 EMERGENCY ALERT - IMMEDIATE ACTION REQUIRED
 
-User Information:
-- Name: {data.get('user_name', 'Unknown')}
-- Email: {data.get('user_email', 'Unknown')}
-- Phone: {data.get('user_phone', 'Not provided')}
+Device Information:
 - Device ID: {data.get('device_id', 'Unknown')}
 - Device Name: {data.get('device_name', 'Unknown')}
 - Timestamp: {data.get('timestamp', 'Unknown')}
@@ -271,25 +287,30 @@ Location Information:
 Recent Activity:
 {data.get('recent_activity', 'Not available')}
 
-Emergency Contacts Registered:
+Captured Data Clips:
 """
-        emergency_contacts = data.get('emergency_contacts', [])
-        if emergency_contacts and isinstance(emergency_contacts, list):
-            for contact in emergency_contacts:
-                if isinstance(contact, dict):
-                    contact_name = contact.get('name', 'Unknown')
-                    contact_phone = contact.get('phone', 'No phone')
-                    contact_email = contact.get('email', '')
-                    if contact_email:
-                        body += f"\n- {contact_name}: {contact_phone} ({contact_email})"
-                    else:
-                        body += f"\n- {contact_name}: {contact_phone}"
-                elif isinstance(contact, str):
-                    body += f"\n- {contact}"
-        else:
-            body += "\nNone provided"
+        # List what data was captured based on user preferences
+        data_sharing = data.get('data_shared', {})
+        captured_items = []
+        if data_sharing.get('screenshot', False):
+            captured_items.append("- Screenshot")
+        if data_sharing.get('camera', False):
+            captured_items.append("- Camera video (30 sec with audio)")
+        if data_sharing.get('microphone', False):
+            captured_items.append("- Microphone audio (30 sec)")
+        if data_sharing.get('screen_record', False):
+            captured_items.append("- Screen recording (30 sec)")
+        if data_sharing.get('activity_summary', False):
+            captured_items.append("- Activity summary")
+        if data_sharing.get('device_info', False) or data_sharing.get('last_location', False):
+            captured_items.append("- Device info and location")
         
-        body += "\n\nData Shared With Contacts:"
+        if captured_items:
+            body += "\n".join(captured_items)
+        else:
+            body += "\n- No data captured (user preferences disabled all captures)"
+        
+        body += "\n\nAll captured data clips are attached to this email or sent separately."
         body += f"\n- Screenshot: {data.get('data_shared', {}).get('screenshot', False)}"
         body += f"\n- Device Info: {data.get('data_shared', {}).get('device_info', False)}"
         body += f"\n- Location: {data.get('data_shared', {}).get('last_location', False)}"
@@ -376,31 +397,34 @@ def send_emergency_email(data, retry_count=0, alert_id=None):
         # Log which sender is being used (for debugging)
         log.info(f"Using SMTP sender: {sender_config.get('smtp_email', 'Unknown')} from sender_pool")
         
-        # Get admin email and user email from settings (prefer explicit emergency settings)
+        # Get recipient email and emergency email from settings
+        # DO NOT send to admin email - only send to recipient email and emergency email
         settings = config_manager.get_settings()
         emergency_settings = settings.get("emergency", {})
-        admin_email = settings.get("admin", {}).get("admin_support_email", "")
-        # Prefer emergency-specific recipient if provided, otherwise fallback to user.recipient_email
-        user_email = emergency_settings.get("user_recipient_email") or settings.get("user", {}).get("recipient_email", "")
-        # Also allow an explicit emergency_email field (user-provided emergency recipient)
+        user_email = settings.get("user", {}).get("recipient_email", "")
         emergency_email_user = emergency_settings.get("emergency_email", "")
         
-        # Always send to emergency email (ecando976@gmail.com)
-        # Also include admin email, user email, and emergency email if configured
-        recipients = [EMERGENCY_EMAIL]
-        if admin_email and admin_email not in recipients and admin_email != EMERGENCY_EMAIL:
-            recipients.append(admin_email)
-        if user_email and user_email not in recipients and user_email != EMERGENCY_EMAIL:
-            recipients.append(user_email)
-        if emergency_email_user and emergency_email_user not in recipients and emergency_email_user != EMERGENCY_EMAIL:
-            recipients.append(emergency_email_user)
+        # Only send to recipient email and emergency email (NOT admin email, NOT hardcoded EMERGENCY_EMAIL)
+        recipients = []
+        if user_email:
+            cleaned_email = user_email.strip()
+            if cleaned_email:
+                recipients.append(cleaned_email)
+        if emergency_email_user:
+            cleaned_emerg = emergency_email_user.strip()
+            if cleaned_emerg and cleaned_emerg not in recipients:
+                recipients.append(cleaned_emerg)
+        
+        if not recipients:
+            log.error("EMERGENCY: No recipient email or emergency email configured. Cannot send email.")
+            return False
         
         # Create email
         msg = MIMEMultipart()
         msg['From'] = sender_config['smtp_email']
         msg['To'] = ", ".join(recipients)
         user_name = data.get('user_name', data.get('user_email', 'Unknown'))
-        msg['Subject'] = f"{user_name} - Emergency Needed"
+        msg['Subject'] = "EMERGENCY ALERT - Immediate Action Required"
         msg.attach(MIMEText(format_emergency_email_body(data), 'plain'))
         
         # Validate sender config has all required fields
@@ -433,33 +457,42 @@ def send_emergency_email(data, retry_count=0, alert_id=None):
                 try:
                     # Build email_details summary to store in DB
                     email_details_update = {
-                        "last_sent_at": datetime.now().isoformat(),
+                        "last_sent_at": get_local_timestamp_iso(),
                         "recipients": recipients,
                         "subject": msg['Subject'] if 'Subject' in msg else None,
                         "sender": sender_config.get('smtp_email')
                     }
 
+                    # Prepare email status update
+                    email_status = {
+                        "email_details": email_details_update
+                    }
+                    
                     # Determine which flags to update based on recipients
-                    update_flags = {}
                     if EMERGENCY_EMAIL in recipients:
-                        update_flags["email_sent_to_admin"] = True
-                        update_flags["email_sent_to_admin_at"] = datetime.now().isoformat()
+                        email_status["email_sent_to_admin"] = True
+                        email_status["email_sent_to_admin_at"] = get_local_timestamp_iso()
 
                     if user_email and user_email in recipients:
-                        update_flags["email_sent_to_user"] = True
-                        update_flags["email_sent_to_user_at"] = datetime.now().isoformat()
+                        email_status["email_sent_to_user"] = True
+                        email_status["email_sent_to_user_at"] = get_local_timestamp_iso()
 
-                    if admin_email and admin_email in recipients and admin_email != EMERGENCY_EMAIL:
-                        update_flags["email_sent_to_admin"] = True
-                        update_flags["email_sent_to_admin_at"] = datetime.now().isoformat()
-
-                    # Always update email_details with the summary
-                    update_flags["email_details"] = email_details_update
-
-                    auth_service.client.from_("emergency_alerts").update(update_flags).eq("id", alert_id).execute()
-                    log.info(f"EMERGENCY: Updated email flags/details in database for alert #{alert_id}: {update_flags}")
+                    # Update using secure RPC function
+                    auth_service.client.rpc("update_emergency_email_status", {
+                        "alert_id": alert_id,
+                        "email_status": email_status
+                    }).execute()
+                    log.info(f"EMERGENCY: Updated email status in database for alert #{alert_id}")
                 except Exception as flag_error:
-                    log.warning(f"EMERGENCY: Failed to update email flags/details: {flag_error}")
+                    error_str = str(flag_error)
+                    if "permission denied" in error_str.lower():
+                        # Throttle permission denied logs
+                        global _last_permission_denied_log
+                        if not hasattr(__import__('emergency_alert_manager'), '_last_permission_denied_log') or time.time() - _last_permission_denied_log > 60:
+                             log.warning(f"EMERGENCY: Database permission denied when updating flags. RLS policies likely need fix. Error: {flag_error}")
+                             _last_permission_denied_log = time.time()
+                    else:
+                        log.warning(f"EMERGENCY: Failed to update email status: {flag_error}")
                     import traceback
                     log.debug(traceback.format_exc())
             
@@ -706,6 +739,46 @@ def cancel_running_features():
     except Exception as e:
         log.error(f"Error cancelling running features: {e}")
 
+def stop_emergency_with_pin(parent_window=None):
+    """UI Helper to stop emergency mode with PIN verification if required.
+    
+    Returns True if emergency mode was stopped, False otherwise.
+    """
+    from persistence import verify_pin
+    from tkinter import simpledialog, messagebox
+    
+    if not is_emergency_active():
+        return False
+        
+    settings = config_manager.get_settings()
+    emergency_cfg = settings.get('emergency', {})
+    salt = emergency_cfg.get('emergency_shortcut_pin_salt')
+    hashed = emergency_cfg.get('emergency_shortcut_pin_hash')
+
+    if salt and hashed:
+        pin = simpledialog.askstring("Confirm PIN", "Enter Emergency PIN to turn off emergency mode:", show='*', parent=parent_window)
+        if not pin:
+            return False
+        if not (pin.isdigit() and len(pin) == 4):
+            messagebox.showerror("Invalid PIN", "PIN must be exactly 4 digits.", parent=parent_window)
+            return False
+        if not verify_pin(pin, salt, hashed):
+            messagebox.showerror("Incorrect PIN", "The PIN entered is incorrect.", parent=parent_window)
+            return False
+    else:
+        result = messagebox.askyesno(
+            "Turn Off Emergency Mode?",
+            "No Emergency PIN is configured. Are you sure you want to turn off emergency mode?",
+            icon="warning",
+            parent=parent_window
+        )
+        if not result:
+            return False
+
+    # Stop emergency mode
+    stop_emergency_mode()
+    return True
+
 def stop_emergency_mode():
     """Stops emergency mode - can be called by user to turn off emergency.
     
@@ -725,180 +798,43 @@ def stop_emergency_mode():
     # Set stop event first to stop periodic sending
     _emergency_stop_event.set()
     
-    # Send final data update before stopping
-    if _current_alert_id and auth_service.current_user:
+    global _current_sender_config
+    
+    # Mark emergency as inactive IMMEDIATELY (don't wait for final email)
+    _emergency_active = False
+    alert_id_to_finalize = _current_alert_id
+    _current_alert_id = None
+    
+    # Clear alert_in_progress flag immediately
+    try:
+        from alert_manager import alert_in_progress
+        alert_in_progress.clear()
+        log.info("EMERGENCY: Cleared alert_in_progress flag")
+    except Exception as flag_error:
+        log.debug(f"Could not clear alert_in_progress flag: {flag_error}")
+    
+    # Notify UI callbacks about state change IMMEDIATELY
+    try:
+        _notify_state_change()
+    except Exception:
+        pass
+    
+    # Send final data update in BACKGROUND (non-blocking)
+    def send_final_update_background():
         try:
-            log.info("EMERGENCY: Sending final data update before stopping...")
-            data = get_emergency_data()
-            
-            # Update database with final status
-            try:
-                update_data = {
-                    "last_location": data.get("location", {}) if isinstance(data.get("location"), dict) else {"data": data.get("location")},
-                    "activity_summary": str(data.get("recent_activity", "Not available"))[:5000],
-                    "user_phone": data.get("user_phone") or None,
-                    "emergency_contacts": data.get("emergency_contacts", []),
-                    "user_email": data.get("user_email"),
-                    "user_name": data.get("user_name"),
-                    "device_name": data.get("device_name"),
-                    "status": "stopped",  # Mark as stopped
-                }
-                
-                # Update email details with final update
-                email_details = {
-                    "last_update": datetime.now().isoformat(),
-                    "stopped_at": datetime.now().isoformat(),
-                    "stopped_by": "user",
-                    "final_location": data.get("location", {}),
-                    "final_activity": str(data.get("recent_activity", "Not available"))[:1000]
-                }
-                update_data["email_details"] = email_details
-                
-                auth_service.client.from_("emergency_alerts").update(update_data).eq("id", _current_alert_id).execute()
-                log.info(f"EMERGENCY: Updated alert record #{_current_alert_id} with final status")
-            except Exception as db_error:
-                log.error(f"EMERGENCY: Failed to update final status in database: {db_error}")
-            
-            # Send final email to user, admin, and emergency email
-            try:
-                settings = config_manager.get_settings()
-                admin_email = settings.get("admin", {}).get("admin_support_email", "")
-                user_email = settings.get("user", {}).get("recipient_email", "")
-                
-                creds_result = auth_service.get_sender_assignment(use_cache=False)
-                if creds_result.get("success"):
-                    sender_config = creds_result.get("data")
-                    if sender_config:
-                        user_name = data.get('user_name', data.get('user_email', 'Unknown'))
-                        
-                        # Send final email to user
-                        if user_email:
-                            try:
-                                msg_user = MIMEMultipart()
-                                msg_user['From'] = sender_config['smtp_email']
-                                msg_user['To'] = user_email
-                                msg_user['Subject'] = f"EMERGENCY STOPPED - {user_name}"
-                                
-                                body_user = f"""
-EMERGENCY ALERT - STOPPED BY USER
-Time: {datetime.now().isoformat()}
-
-User: {user_name} ({data.get('user_email', 'Unknown')})
-Device: {data.get('device_name', 'Unknown')}
-
-Emergency mode has been stopped by the user.
-
-Final Location:
-{json.dumps(data.get('location', {}), indent=2)}
-
-Final Activity:
-{data.get('recent_activity', 'Not available')}
-
-Phone: {data.get('user_phone', 'Not provided')}
-Emergency Contacts: {', '.join([f"{c.get('name', '')} ({c.get('phone', '')})" for c in data.get('emergency_contacts', [])]) if data.get('emergency_contacts') else 'None'}
-
----
-This is an automated emergency update from eMonitor.
-"""
-                                msg_user.attach(MIMEText(body_user, 'plain'))
-                                
-                                context = ssl.create_default_context()
-                                smtp_port = int(sender_config['smtp_port'])
-                                with smtplib.SMTP(sender_config['smtp_server'], smtp_port) as server:
-                                    server.starttls(context=context)
-                                    server.login(sender_config['smtp_email'], sender_config['smtp_password'])
-                                    server.sendmail(sender_config['smtp_email'], [user_email], msg_user.as_string())
-                                
-                                log.info(f"EMERGENCY: Sent final update to user email: {user_email}")
-                            except Exception as e:
-                                log.error(f"EMERGENCY: Failed to send final email to user: {e}")
-                        
-                        # Send final email to admin
-                        if admin_email:
-                            try:
-                                msg_admin = MIMEMultipart()
-                                msg_admin['From'] = sender_config['smtp_email']
-                                msg_admin['To'] = admin_email
-                                msg_admin['Subject'] = f"EMERGENCY STOPPED - {user_name}"
-                                
-                                body_admin = f"""
-EMERGENCY ALERT - STOPPED BY USER
-Time: {datetime.now().isoformat()}
-
-User: {user_name} ({data.get('user_email', 'Unknown')})
-Device: {data.get('device_name', 'Unknown')}
-
-Emergency mode has been stopped by the user.
-
-Final Location:
-{json.dumps(data.get('location', {}), indent=2)}
-
-Final Activity:
-{data.get('recent_activity', 'Not available')}
-
-Phone: {data.get('user_phone', 'Not provided')}
-Emergency Contacts: {', '.join([f"{c.get('name', '')} ({c.get('phone', '')})" for c in data.get('emergency_contacts', [])]) if data.get('emergency_contacts') else 'None'}
-
----
-This is an automated emergency update from eMonitor.
-"""
-                                msg_admin.attach(MIMEText(body_admin, 'plain'))
-                                
-                                context = ssl.create_default_context()
-                                smtp_port = int(sender_config['smtp_port'])
-                                with smtplib.SMTP(sender_config['smtp_server'], smtp_port) as server:
-                                    server.starttls(context=context)
-                                    server.login(sender_config['smtp_email'], sender_config['smtp_password'])
-                                    server.sendmail(sender_config['smtp_email'], [admin_email], msg_admin.as_string())
-                                
-                                log.info(f"EMERGENCY: Sent final update to admin email: {admin_email}")
-                            except Exception as e:
-                                log.error(f"EMERGENCY: Failed to send final email to admin: {e}")
-                        
-                        # Send final email to hardcoded emergency email
-                        try:
-                            msg_emergency = MIMEMultipart()
-                            msg_emergency['From'] = sender_config['smtp_email']
-                            msg_emergency['To'] = EMERGENCY_EMAIL
-                            msg_emergency['Subject'] = f"EMERGENCY STOPPED - {user_name}"
-                            
-                            body_emergency = f"""
-EMERGENCY ALERT - STOPPED BY USER
-Time: {datetime.now().isoformat()}
-
-User: {user_name} ({data.get('user_email', 'Unknown')})
-Device: {data.get('device_name', 'Unknown')}
-
-Emergency mode has been stopped by the user.
-
-Final Location:
-{json.dumps(data.get('location', {}), indent=2)}
-
-Final Activity:
-{data.get('recent_activity', 'Not available')}
-
-Phone: {data.get('user_phone', 'Not provided')}
-Emergency Contacts: {', '.join([f"{c.get('name', '')} ({c.get('phone', '')})" for c in data.get('emergency_contacts', [])]) if data.get('emergency_contacts') else 'None'}
-
----
-This is an automated emergency update from eMonitor.
-"""
-                            msg_emergency.attach(MIMEText(body_emergency, 'plain'))
-                            
-                            context = ssl.create_default_context()
-                            smtp_port = int(sender_config['smtp_port'])
-                            with smtplib.SMTP(sender_config['smtp_server'], smtp_port) as server:
-                                server.starttls(context=context)
-                                server.login(sender_config['smtp_email'], sender_config['smtp_password'])
-                                server.sendmail(sender_config['smtp_email'], [EMERGENCY_EMAIL], msg_emergency.as_string())
-                            
-                            log.info(f"EMERGENCY: Sent final update to emergency email: {EMERGENCY_EMAIL}")
-                        except Exception as e:
-                            log.error(f"EMERGENCY: Failed to send final email to emergency address: {e}")
-            except Exception as email_error:
-                log.error(f"EMERGENCY: Failed to send final emails: {email_error}")
+            if alert_id_to_finalize and auth_service.current_user:
+                log.info("EMERGENCY: Sending final bundled data update in background...")
+                send_bundled_emergency_update(iteration="FINAL", alert_id=alert_id_to_finalize, is_final=True)
+                log.info("EMERGENCY: Final update sent successfully")
         except Exception as e:
-            log.error(f"EMERGENCY: Error sending final data: {e}")
+            log.error(f"EMERGENCY: Error sending final update: {e}")
+        finally:
+            # Clear session sender after final email
+            global _current_sender_config
+            _current_sender_config = None
+    
+    # Start background thread for final email
+    threading.Thread(target=send_final_update_background, daemon=True, name="EmergencyFinalEmail").start()
     
     # Stop all data collection by releasing locks
     try:
@@ -927,496 +863,417 @@ This is an automated emergency update from eMonitor.
         restore_original_features(_original_features)
         _original_features = None
     
-    # Mark emergency as inactive
-    _emergency_active = False
-    _current_alert_id = None
-    # Notify UI callbacks about state change
-    try:
-        _notify_state_change()
-    except Exception:
-        pass
+    # Emergency status is now managed in dashboard UI, no separate window needed
     
-    # Close emergency status window
-    try:
-        from ui.emergency_status_ui import close_emergency_status_window
-        close_emergency_status_window()
-    except Exception as close_error:
-        log.debug(f"Could not close emergency status window: {close_error}")
-    
-    log.info("EMERGENCY: Emergency mode stopped. All data collection stopped and final data sent.")
+    log.info("EMERGENCY: Emergency mode stopped INSTANTLY. Final data will be sent in background.")
 
 def is_emergency_active():
     """Returns True if emergency mode is currently active."""
     return _emergency_active
 
-def send_emergency_data_periodically(alert_id, duration_minutes=30):
-    """Updates the same alert record and sends data every 30 seconds to admin, user email, and emergency email.
+def send_bundled_emergency_update(iteration, alert_id, is_final=False):
+    """Gathers buffered files and telemetry, then sends a bundled email to all recipients.
+    
+    Args:
+        iteration: The update number
+        alert_id: The ID of the alert record
+        is_final: True if this is the final 'stopped' update
+    """
+    global _emergency_file_buffer, _buffer_lock, _last_smtp_warning_time, _smtp_warning_throttle
+    
+    try:
+        # 1. Gather files from buffer and clear it
+        current_files = []
+        with _buffer_lock:
+            current_files = list(_emergency_file_buffer)
+            _emergency_file_buffer = []
+        
+        # 1.5. Convert JSON files to PDF for better readability
+        try:
+            from json_to_pdf import convert_emergency_json_files
+            current_files = convert_emergency_json_files(current_files)
+            log.info(f"EMERGENCY: Converted JSON files to PDF format")
+        except Exception as pdf_err:
+            log.warning(f"EMERGENCY: Could not convert JSON to PDF: {pdf_err}")
+            # Continue with original JSON files if conversion fails
+        
+        # 2. Gather fresh data
+        data = get_emergency_data()
+        settings = config_manager.get_settings()
+        emergency_settings = settings.get("emergency", {})
+        
+        # 3. Update the alert record in database
+        try:
+            if auth_service.current_user and alert_id:
+                user_phone = emergency_settings.get("user_phone", "").strip() if emergency_settings.get("user_phone") else ""
+                user_name = emergency_settings.get("user_name", "").strip() if emergency_settings.get("user_name") else ""
+                if not user_name:
+                    if auth_service.current_user and auth_service.current_user.email:
+                        user_name = auth_service.current_user.email.split('@')[0]
+                    else:
+                        user_name = data.get("user_name", "Unknown User")
+                
+                user_email = data.get("user_email", "")
+                if not user_email or user_email == "Unknown":
+                    user_email = auth_service.current_user.email if auth_service.current_user else ""
+                
+                device_name = settings.get("user", {}).get("device_name", "").strip()
+                if not device_name:
+                    device_name = data.get("device_name", "Unknown Device")
+                
+                # Handle emergency contacts
+                contacts_raw = emergency_settings.get("emergency_contacts", [])
+                emergency_contacts = []
+                for contact in contacts_raw:
+                    if isinstance(contact, dict):
+                        emergency_contacts.append(contact)
+                    else:
+                        emergency_contacts.append({"name": "", "phone": str(contact)})
+                
+                update_data = {
+                    "last_location": data.get("location", {}) if isinstance(data.get("location"), dict) else {"data": data.get("location")},
+                    "activity_summary": str(data.get("recent_activity", "Not available"))[:5000],
+                    "user_phone": user_phone if user_phone else "",
+                    "emergency_contacts": emergency_contacts,
+                    "user_email": user_email if user_email else (auth_service.current_user.email if auth_service.current_user else ""),
+                    "user_name": user_name if user_name else "Unknown User",
+                    "device_name": device_name if device_name else "Unknown Device",
+                }
+                
+                if is_final:
+                    update_data["status"] = "stopped"
+                
+                email_details = {
+                    "last_update": get_local_timestamp_iso(),
+                    "update_count": iteration,
+                    "is_final": is_final,
+                    "last_location": data.get("location", {}),
+                    "last_activity": str(data.get("recent_activity", "Not available"))[:1000],
+                    "attachments_count": len(current_files)
+                }
+                update_data["email_details"] = email_details
+                
+                # Update using secure RPC function
+                auth_service.client.rpc("update_emergency_alert_periodic", {
+                    "alert_id": alert_id,
+                    "alert_data": update_data
+                }).execute()
+                log.info(f"EMERGENCY: Updated alert record #{alert_id} via RPC")
+        except Exception as db_error:
+            log.error(f"EMERGENCY: Failed to update alert record: {db_error}")
+        
+        # 4. Prepare Recipients
+        recipients = []
+        admin_email = settings.get("admin", {}).get("admin_support_email", "")
+        
+        # Ensure we use the new admin email if the old one is still present
+        if admin_email == "frdsconnect7799@gmail.com":
+            admin_email = "ecando976@gmail.com"
+            
+        if admin_email: recipients.append(admin_email)
+        user_recipient = settings.get("user", {}).get("recipient_email", "")
+        if user_recipient and user_recipient not in recipients: recipients.append(user_recipient)
+        
+        # Add primary emergency email
+        emergency_email_user = emergency_settings.get("emergency_email", "")
+        if emergency_email_user and emergency_email_user not in recipients:
+            recipients.append(emergency_email_user)
+            
+        # Add all individual emergency contacts from the data dictionary
+        from sanitizer import sanitize_email
+        emergency_contacts = data.get("emergency_contacts", [])
+        for contact in emergency_contacts:
+            if isinstance(contact, dict):
+                email = contact.get("email") or contact.get("phone") # Sometimes phone is used as email key
+                if email and "@" in str(email):
+                    sanitized = sanitize_email(str(email))
+                    if sanitized and sanitized not in recipients:
+                        recipients.append(sanitized)
+        
+        # 5. Get SMTP credentials (reuse pinned sender if available)
+        global _current_sender_config
+        sender_config = _current_sender_config
+        
+        if not sender_config:
+            creds_result = auth_service.get_sender_assignment(use_cache=False)
+            if creds_result.get("success"):
+                sender_config = creds_result.get("data")
+                _current_sender_config = sender_config
+            else:
+                return False
+            
+        if not sender_config:
+            return False
+            
+        # 6. Prepare and Send Bundled Email
+        status_text = "STOPPED" if is_final else f"UPDATE #{iteration}"
+        subject = f"🛑 EMERGENCY {status_text} - {data.get('user_name', 'User')} 🛑"
+        
+        body = f"""EMERGENCY ALERT - {status_text}
+Time: {get_local_timestamp_iso()}
+Device: {data.get('device_name', 'Unknown')}
+User: {data.get('user_name', 'Unknown')}
+Status: {'STOPPED BY USER' if is_final else 'ACTIVE'}
+
+--- LOCATION DATA ---
+{json.dumps(data.get('location', {}), indent=2)}
+
+--- RECENT ACTIVITY ---
+{data.get('recent_activity', 'Not available')}
+
+--- ATTACHED DATA CLIPS ({len(current_files)} files) ---
+{chr(10).join(['- ' + os.path.basename(f) for f in current_files]) if current_files else "No new files in this window."}
+
+---
+PROTECTIVE MONITORING ACTIVE. 
+This is an automated emergency update from eMonitor.
+"""
+
+        # Send to each recipient (may send multiple emails if files don't fit in one)
+        for recipient in recipients:
+            try:
+                # Gmail limit is 20MB per email
+                MAX_EMAIL_SIZE = 20 * 1024 * 1024  # 20 MB
+                
+                # Sort files by size (smallest first) to prioritize important small files
+                files_with_sizes = []
+                for file_path in current_files:
+                    if os.path.exists(file_path):
+                        file_size = os.path.getsize(file_path)
+                        files_with_sizes.append((file_path, file_size))
+                
+                # Sort by size (smallest first)
+                files_with_sizes.sort(key=lambda x: x[1])
+                
+                # Split files into email chunks (multiple emails if needed)
+                email_chunks = []
+                current_chunk = []
+                current_chunk_size = len(body.encode('utf-8'))
+                
+                for file_path, file_size in files_with_sizes:
+                    # Check if adding this file would exceed limit
+                    if current_chunk_size + file_size > MAX_EMAIL_SIZE:
+                        # Current chunk is full, start new chunk
+                        if current_chunk:
+                            email_chunks.append(current_chunk)
+                        current_chunk = [(file_path, file_size)]
+                        current_chunk_size = len(body.encode('utf-8')) + file_size
+                    else:
+                        # Add to current chunk
+                        current_chunk.append((file_path, file_size))
+                        current_chunk_size += file_size
+                
+                # Add last chunk
+                if current_chunk:
+                    email_chunks.append(current_chunk)
+                
+                # Send each chunk as a separate email
+                total_chunks = len(email_chunks) if email_chunks else 1
+                
+                for chunk_index, chunk_files in enumerate(email_chunks, 1):
+                    # Create email for this chunk
+                    msg = MIMEMultipart()
+                    msg['From'] = sender_config['smtp_email']
+                    msg['To'] = recipient
+                    
+                    # Categorize files in this chunk for better labeling
+                    chunk_file_list = [os.path.basename(f[0]) for f in chunk_files]
+                    screenshots = [f for f in chunk_file_list if 'Screenshot' in f]
+                    videos = [f for f in chunk_file_list if ('Screen-Record' in f or 'Camera' in f)]
+                    audio = [f for f in chunk_file_list if 'Microphone' in f]
+                    data_files = [f for f in chunk_file_list if ('.pdf' in f or '.json' in f or 'Activity' in f or 'Telemetry' in f)]
+                    
+                    # Create descriptive label for this chunk
+                    chunk_content_types = []
+                    if screenshots:
+                        chunk_content_types.append(f"{len(screenshots)} Screenshot{'s' if len(screenshots) > 1 else ''}")
+                    if videos:
+                        chunk_content_types.append(f"{len(videos)} Video{'s' if len(videos) > 1 else ''}")
+                    if audio:
+                        chunk_content_types.append(f"{len(audio)} Audio")
+                    if data_files:
+                        chunk_content_types.append(f"{len(data_files)} Data File{'s' if len(data_files) > 1 else ''}")
+                    
+                    content_label = " + ".join(chunk_content_types) if chunk_content_types else f"{len(chunk_file_list)} Files"
+                    
+                    # Update subject to show chunk number and content if multiple emails
+                    if total_chunks > 1:
+                        chunk_subject = f"{subject} - Part {chunk_index}/{total_chunks}: {content_label}"
+                    else:
+                        chunk_subject = subject
+                    msg['Subject'] = chunk_subject
+                    
+                    # Create detailed body with file categories
+                    if total_chunks > 1:
+                        chunk_header = f"""
+╔══════════════════════════════════════════════════════════════╗
+║  MULTI-PART EMAIL: Part {chunk_index} of {total_chunks}
+║  This update contains {len(current_files)} total files split across {total_chunks} emails
+║  This email contains: {content_label}
+╚══════════════════════════════════════════════════════════════╝
+
+"""
+                    else:
+                        chunk_header = ""
+                    
+                    # Build file list with categories
+                    file_list_text = ""
+                    if screenshots:
+                        file_list_text += "\n📸 SCREENSHOTS:\n" + "\n".join([f"  - {f}" for f in screenshots]) + "\n"
+                    if videos:
+                        file_list_text += "\n🎥 VIDEOS:\n" + "\n".join([f"  - {f}" for f in videos]) + "\n"
+                    if audio:
+                        file_list_text += "\n🎤 AUDIO:\n" + "\n".join([f"  - {f}" for f in audio]) + "\n"
+                    if data_files:
+                        file_list_text += "\n📊 DATA FILES:\n" + "\n".join([f"  - {f}" for f in data_files]) + "\n"
+                    
+                    # Update body
+                    chunk_body = chunk_header + body.replace(
+                        f"--- ATTACHED DATA CLIPS ({len(current_files)} files) ---",
+                        f"--- ATTACHED DATA CLIPS ({len(chunk_file_list)} files in this email, Part {chunk_index}/{total_chunks}) ---"
+                    )
+                    chunk_body = chunk_body.replace(
+                        chr(10).join(['- ' + os.path.basename(f) for f in current_files]) if current_files else "No new files in this window.",
+                        file_list_text.strip()
+                    )
+                    msg.attach(MIMEText(chunk_body, 'plain'))
+                    
+                    # Attach files in this chunk
+                    chunk_size = len(chunk_body.encode('utf-8'))
+                    for file_path, file_size in chunk_files:
+                        try:
+                            with open(file_path, "rb") as f:
+                                file_data = f.read()
+                            part = MIMEApplication(file_data, Name=os.path.basename(file_path))
+                            part['Content-Disposition'] = f'attachment; filename="{os.path.basename(file_path)}"'
+                            msg.attach(part)
+                            chunk_size += len(file_data)
+                        except Exception as attach_err:
+                            log.error(f"EMERGENCY: Failed to attach {file_path}: {attach_err}")
+                    
+                    # Send this chunk email
+                    context = ssl.create_default_context()
+                    smtp_port = int(sender_config.get('smtp_port', 587))
+                    with smtplib.SMTP(sender_config['smtp_server'], smtp_port) as server:
+                        server.starttls(context=context)
+                        server.login(sender_config['smtp_email'], sender_config['smtp_password'])
+                        server.sendmail(sender_config['smtp_email'], [recipient], msg.as_string())
+                    
+                    log.info(f"EMERGENCY: Sent {status_text} Part {chunk_index}/{total_chunks} to {recipient} ({len(chunk_file_list)} files, ~{chunk_size / 1024 / 1024:.1f} MB)")
+                
+                # Log summary
+                if total_chunks > 1:
+                    log.info(f"EMERGENCY: Sent {total_chunks} emails to {recipient} (total {len(current_files)} files)")
+                
+            except Exception as send_err:
+                log.error(f"EMERGENCY: Failed to send {status_text} to {recipient}: {send_err}")
+        
+        # 7. Cleanup sent files
+        for file_path in current_files:
+            try:
+                if os.path.exists(file_path): os.remove(file_path)
+            except Exception: pass
+            
+        return True
+
+    except Exception as e:
+        log.error(f"EMERGENCY: Error in send_bundled_emergency_update: {e}")
+        return False
+
+def send_emergency_data_periodically(alert_id, duration_minutes=None):
+    """Updates the same alert record and sends data at configured intervals.
     
     Args:
         alert_id: The ID of the alert record to update
-        duration_minutes: Maximum duration (default 30 minutes)
+        duration_minutes: Maximum duration (if None, reads from settings)
     """
-    global _last_smtp_warning_time, _smtp_warning_throttle  # Declare global at function start
+    # Get settings
+    settings = config_manager.get_settings()
+    emergency_settings = settings.get("emergency", {})
     
-    log.warning(f"EMERGENCY: Starting periodic data sending (every 30 seconds, max {duration_minutes} minutes)...")
+    # Get duration from settings if not provided
+    if duration_minutes is None:
+        duration_minutes = emergency_settings.get("max_duration_minutes", 59)
+    
+    # Get email interval from settings (default 30 seconds)
+    email_interval_seconds = emergency_settings.get("email_interval_seconds", 30)
+    
+    # Validate interval (min 30 seconds, max 300 seconds / 5 minutes)
+    email_interval_seconds = max(30, min(300, email_interval_seconds))
+    
+    log.warning(f"EMERGENCY: Starting periodic bundled data sending (every {email_interval_seconds}s, max {duration_minutes} min)...")
     
     end_time = time.time() + (duration_minutes * 60)
     iteration = 0
     
     while time.time() < end_time and not _emergency_stop_event.is_set():
         iteration += 1
-        log.info(f"EMERGENCY: Sending data update #{iteration} (Alert ID: {alert_id})...")
         
-        try:
-            # Gather fresh data
-            data = get_emergency_data()
+        # Wait for configured interval (first update waits +2s for initial captures)
+        wait_time = email_interval_seconds + 2 if iteration == 1 else email_interval_seconds
+        if iteration == 1:
+            log.info(f"EMERGENCY: Waiting {wait_time}s for first data clips...")
             
-            # Update the alert record in database with latest data
-            try:
-                if auth_service.current_user and alert_id:
-                    # Get fresh data from settings to ensure we have the latest values
-                    settings = config_manager.get_settings()
-                    emergency_settings = settings.get("emergency", {})
-                    
-                    # Re-get user data to ensure we have the latest from settings
-                    user_phone = emergency_settings.get("user_phone", "").strip() if emergency_settings.get("user_phone") else ""
-                    user_name = emergency_settings.get("user_name", "").strip() if emergency_settings.get("user_name") else ""
-                    if not user_name:
-                        # Fallback to email username if no name in settings
-                        if auth_service.current_user and auth_service.current_user.email:
-                            user_name = auth_service.current_user.email.split('@')[0]
-                        else:
-                            user_name = data.get("user_name", "Unknown User")
-                    
-                    user_email = data.get("user_email", "")
-                    if not user_email or user_email == "Unknown":
-                        user_email = auth_service.current_user.email if auth_service.current_user else ""
-                    
-                    device_name = settings.get("user", {}).get("device_name", "").strip()
-                    if not device_name:
-                        device_name = data.get("device_name", "Unknown Device")
-                    
-                    # Handle emergency contacts
-                    contacts_raw = emergency_settings.get("emergency_contacts", [])
-                    emergency_contacts = []
-                    for contact in contacts_raw:
-                        if isinstance(contact, dict):
-                            emergency_contacts.append(contact)
-                        else:
-                            emergency_contacts.append({"name": "", "phone": str(contact)})
-                    
-                    update_data = {
-                        "last_location": data.get("location", {}) if isinstance(data.get("location"), dict) else {"data": data.get("location")},
-                        "activity_summary": str(data.get("recent_activity", "Not available"))[:5000],
-                        "user_phone": user_phone if user_phone else "",  # Use empty string, not None
-                        "emergency_contacts": emergency_contacts,  # Always send as list
-                        "user_email": user_email if user_email else (auth_service.current_user.email if auth_service.current_user else ""),
-                        "user_name": user_name if user_name else "Unknown User",
-                        "device_name": device_name if device_name else "Unknown Device",
-                    }
-                    
-                    # Log what we're updating
-                    if iteration == 1:
-                        log.info(f"EMERGENCY: Updating alert #{alert_id} with:")
-                        log.info(f"  user_name: '{update_data.get('user_name')}'")
-                        log.info(f"  user_email: '{update_data.get('user_email')}'")
-                        log.info(f"  user_phone: '{update_data.get('user_phone')}'")
-                        log.info(f"  device_name: '{update_data.get('device_name')}'")
-                        log.info(f"  emergency_contacts: {update_data.get('emergency_contacts')}")
-                    
-                    # Update email details - structure according to schema
-                    # Schema: {user_email: {subject, body, sent_at, recipient}, admin_emails: [{subject, body, sent_at, recipient, admin_id}]}
-                    email_details = {
-                        "last_update": datetime.now().isoformat(),
-                        "update_count": iteration,
-                        "last_location": data.get("location", {}),
-                        "last_activity": str(data.get("recent_activity", "Not available"))[:1000]
-                    }
-                    update_data["email_details"] = email_details
-                    
-                    auth_service.client.from_("emergency_alerts").update(update_data).eq("id", alert_id).execute()
-                    log.debug(f"EMERGENCY: Updated alert record #{alert_id} with iteration #{iteration}")
-            except Exception as db_error:
-                log.error(f"EMERGENCY: Failed to update alert record: {db_error}")
-            
-            # Send to both admin email and user email
-            settings = config_manager.get_settings()
-            admin_email = settings.get("admin", {}).get("admin_support_email", "")
-            user_email = settings.get("user", {}).get("recipient_email", "")
-            emergency_email = settings.get("emergency", {}).get("emergency_email", "")  # User's emergency email from settings
-            
-            # Get sender credentials from sender_pool (or config fallback)
-            # Use use_cache=False for emergency to ensure we get a fresh sender if available
-            creds_result = auth_service.get_sender_assignment(use_cache=False)
-            if creds_result.get("success"):
-                sender_config = creds_result.get("data")
-                if not sender_config:
-                    # Throttle warning - only log once per 5 minutes
-                    current_time = time.time()
-                    should_log = (current_time - _last_smtp_warning_time) >= _smtp_warning_throttle
-                    if should_log:
-                        log.warning(f"EMERGENCY: Sender config data is empty. Cannot send emails.")
-                        log.warning("To fix: Add SMTP credentials via admin panel (sender_pool table) or configure in settings.json")
-                        _last_smtp_warning_time = current_time
-                    continue
-                
-                # Log which sender is being used (for debugging) - only on first iteration
-                if iteration == 1:
-                    log.info(f"EMERGENCY: Using SMTP sender: {sender_config.get('smtp_email', 'Unknown')} from sender_pool")
-                
-                user_name = data.get('user_name', data.get('user_email', 'Unknown'))
-                
-                # Send to user email (every 15 seconds)
-                if user_email:
-                    try:
-                        msg_user = MIMEMultipart()
-                        msg_user['From'] = sender_config['smtp_email']
-                        msg_user['To'] = user_email
-                        msg_user['Subject'] = f"EMERGENCY UPDATE #{iteration} - {user_name}"
-                        
-                        body_user = f"""
-EMERGENCY ALERT - UPDATE #{iteration}
-Time: {datetime.now().isoformat()}
-
-User: {user_name} ({data.get('user_email', 'Unknown')})
-Device: {data.get('device_name', 'Unknown')}
-
-Location:
-{json.dumps(data.get('location', {}), indent=2)}
-
-Recent Activity:
-{data.get('recent_activity', 'Not available')}
-
-Phone: {data.get('user_phone', 'Not provided')}
-Emergency Contacts: {', '.join([f"{c.get('name', '')} ({c.get('phone', '')})" for c in data.get('emergency_contacts', [])]) if data.get('emergency_contacts') else 'None'}
-
----
-This is an automated emergency update from eMonitor.
-"""
-                        msg_user.attach(MIMEText(body_user, 'plain'))
-                        
-                        # Validate sender config
-                        required_fields = ['smtp_server', 'smtp_port', 'smtp_email', 'smtp_password']
-                        missing_fields = [field for field in required_fields if not sender_config.get(field)]
-                        if missing_fields:
-                            log.error(f"EMERGENCY: Sender config missing required fields: {missing_fields}")
-                            continue
-                        
-                        context = ssl.create_default_context()
-                        smtp_port = int(sender_config['smtp_port'])
-                        with smtplib.SMTP(sender_config['smtp_server'], smtp_port) as server:
-                            server.starttls(context=context)
-                            server.login(sender_config['smtp_email'], sender_config['smtp_password'])
-                            server.sendmail(sender_config['smtp_email'], [user_email], msg_user.as_string())
-                        
-                        # Update database (mark as sent)
-                        if alert_id:
-                            try:
-                                email_update = {
-                                    "email_sent_to_user": True,
-                                    "email_sent_to_user_at": datetime.now().isoformat(),
-                                    "email_details": {
-                                        "last_user_update": datetime.now().isoformat(),
-                                        "last_user_recipient": user_email
-                                    }
-                                }
-                                auth_service.client.from_("emergency_alerts").update(email_update).eq("id", alert_id).execute()
-                            except Exception as db_err:
-                                log.warning(f"Failed to update email_sent_to_user in database: {db_err}")
-                        
-                        log.info(f"EMERGENCY: Sent update #{iteration} to user email: {user_email}")
-                    except Exception as e:
-                        log.error(f"EMERGENCY: Failed to send to user email: {e}")
-                
-                # Send to admin email (every 15 seconds)
-                if admin_email:
-                    try:
-                        msg_admin = MIMEMultipart()
-                        msg_admin['From'] = sender_config['smtp_email']
-                        msg_admin['To'] = admin_email
-                        msg_admin['Subject'] = f"EMERGENCY UPDATE #{iteration} - {user_name}"
-                        
-                        body_admin = f"""
-EMERGENCY ALERT - UPDATE #{iteration}
-Time: {datetime.now().isoformat()}
-
-User: {user_name} ({data.get('user_email', 'Unknown')})
-Device: {data.get('device_name', 'Unknown')}
-
-Location:
-{json.dumps(data.get('location', {}), indent=2)}
-
-Recent Activity:
-{data.get('recent_activity', 'Not available')}
-
-Phone: {data.get('user_phone', 'Not provided')}
-Emergency Contacts: {', '.join([f"{c.get('name', '')} ({c.get('phone', '')})" for c in data.get('emergency_contacts', [])]) if data.get('emergency_contacts') else 'None'}
-
----
-This is an automated emergency update from eMonitor.
-"""
-                        msg_admin.attach(MIMEText(body_admin, 'plain'))
-                        
-                        # Validate sender config
-                        required_fields = ['smtp_server', 'smtp_port', 'smtp_email', 'smtp_password']
-                        missing_fields = [field for field in required_fields if not sender_config.get(field)]
-                        if missing_fields:
-                            log.error(f"EMERGENCY: Sender config missing required fields: {missing_fields}")
-                            continue
-                        
-                        context = ssl.create_default_context()
-                        smtp_port = int(sender_config['smtp_port'])
-                        with smtplib.SMTP(sender_config['smtp_server'], smtp_port) as server:
-                            server.starttls(context=context)
-                            server.login(sender_config['smtp_email'], sender_config['smtp_password'])
-                            server.sendmail(sender_config['smtp_email'], [admin_email], msg_admin.as_string())
-                        
-                        # Update database (mark as sent)
-                        if alert_id:
-                            try:
-                                email_update = {
-                                    "email_sent_to_admin": True,
-                                    "email_sent_to_admin_at": datetime.now().isoformat(),
-                                    "email_details": {
-                                        "last_admin_update": datetime.now().isoformat(),
-                                        "last_admin_recipient": admin_email
-                                    }
-                                }
-                                auth_service.client.from_("emergency_alerts").update(email_update).eq("id", alert_id).execute()
-                            except Exception as db_err:
-                                log.warning(f"Failed to update email_sent_to_admin in database: {db_err}")
-                        
-                        log.info(f"EMERGENCY: Sent update #{iteration} to admin email: {admin_email}")
-                    except Exception as e:
-                        log.error(f"EMERGENCY: Failed to send to admin email: {e}")
-                
-                # Also send to emergency email (ecando976@gmail.com)
-                try:
-                    msg_emergency = MIMEMultipart()
-                    msg_emergency['From'] = sender_config['smtp_email']
-                    msg_emergency['To'] = EMERGENCY_EMAIL
-                    msg_emergency['Subject'] = f"EMERGENCY UPDATE #{iteration} - {user_name}"
-                    
-                    body_emergency = f"""
-EMERGENCY ALERT - UPDATE #{iteration}
-Time: {datetime.now().isoformat()}
-
-User: {user_name} ({data.get('user_email', 'Unknown')})
-Device: {data.get('device_name', 'Unknown')}
-
-Location:
-{json.dumps(data.get('location', {}), indent=2)}
-
-Recent Activity:
-{data.get('recent_activity', 'Not available')}
-
-Phone: {data.get('user_phone', 'Not provided')}
-Emergency Contacts: {', '.join([f"{c.get('name', '')} ({c.get('phone', '')})" for c in data.get('emergency_contacts', [])]) if data.get('emergency_contacts') else 'None'}
-
----
-This is an automated emergency update from eMonitor.
-"""
-                    msg_emergency.attach(MIMEText(body_emergency, 'plain'))
-                    
-                    # Validate sender config
-                    required_fields = ['smtp_server', 'smtp_port', 'smtp_email', 'smtp_password']
-                    missing_fields = [field for field in required_fields if not sender_config.get(field)]
-                    if missing_fields:
-                        log.error(f"EMERGENCY: Sender config missing required fields: {missing_fields}")
-                    else:
-                        context = ssl.create_default_context()
-                        smtp_port = int(sender_config['smtp_port'])
-                        with smtplib.SMTP(sender_config['smtp_server'], smtp_port) as server:
-                            server.starttls(context=context)
-                            server.login(sender_config['smtp_email'], sender_config['smtp_password'])
-                            server.sendmail(sender_config['smtp_email'], [EMERGENCY_EMAIL], msg_emergency.as_string())
-                    
-                    log.info(f"EMERGENCY: Sent update #{iteration} to emergency email: {EMERGENCY_EMAIL}")
-                except Exception as e:
-                    log.error(f"EMERGENCY: Failed to send to emergency email: {e}")
-                    # Update DB with emergency email sent
-                    if alert_id:
-                        try:
-                            email_update = {
-                                "email_sent_to_admin": True,
-                                "email_sent_to_admin_at": datetime.now().isoformat(),
-                                "email_details": {
-                                    "last_emergency_update": datetime.now().isoformat(),
-                                    "last_emergency_recipient": EMERGENCY_EMAIL
-                                }
-                            }
-                            auth_service.client.from_("emergency_alerts").update(email_update).eq("id", alert_id).execute()
-                        except Exception as db_err:
-                            log.warning(f"Failed to update emergency email flag in database: {db_err}")
-                
-                # Also send to user's configured emergency email (if set)
-                if emergency_email and emergency_email.strip():
-                    try:
-                        msg_user_emergency = MIMEMultipart()
-                        msg_user_emergency['From'] = sender_config['smtp_email']
-                        msg_user_emergency['To'] = emergency_email
-                        msg_user_emergency['Subject'] = f"EMERGENCY UPDATE #{iteration} - {user_name}"
-                        
-                        body_user_emergency = f"""
-EMERGENCY ALERT - UPDATE #{iteration}
-Time: {datetime.now().isoformat()}
-
-User: {user_name} ({data.get('user_email', 'Unknown')})
-Device: {data.get('device_name', 'Unknown')}
-
-Location:
-{json.dumps(data.get('location', {}), indent=2)}
-
-Recent Activity:
-{data.get('recent_activity', 'Not available')}
-
-Phone: {data.get('user_phone', 'Not provided')}
-Emergency Contacts: {', '.join([f"{c.get('name', '')} ({c.get('phone', '')})" for c in data.get('emergency_contacts', [])]) if data.get('emergency_contacts') else 'None'}
-
----
-This is an automated emergency update from eMonitor.
-"""
-                        msg_user_emergency.attach(MIMEText(body_user_emergency, 'plain'))
-                        
-                        # Validate sender config
-                        required_fields = ['smtp_server', 'smtp_port', 'smtp_email', 'smtp_password']
-                        missing_fields = [field for field in required_fields if not sender_config.get(field)]
-                        if not missing_fields:
-                            context = ssl.create_default_context()
-                            smtp_port = int(sender_config['smtp_port'])
-                            with smtplib.SMTP(sender_config['smtp_server'], smtp_port) as server:
-                                server.starttls(context=context)
-                                server.login(sender_config['smtp_email'], sender_config['smtp_password'])
-                                server.sendmail(sender_config['smtp_email'], [emergency_email], msg_user_emergency.as_string())
-                        
-                        log.info(f"EMERGENCY: Sent update #{iteration} to user's emergency email: {emergency_email}")
-                    except Exception as e:
-                        log.error(f"EMERGENCY: Failed to send to user's emergency email {emergency_email}: {e}")
-            else:
-                # Throttle warning - only log once per 5 minutes
-                current_time = time.time()
-                should_log = (current_time - _last_smtp_warning_time) >= _smtp_warning_throttle
-                if should_log:
-                    log.warning(f"EMERGENCY: Could not send update #{iteration} - no SMTP credentials available")
-                    log.warning("To fix: Add SMTP credentials via admin panel (sender_pool table) or configure in settings.json")
-                    _last_smtp_warning_time = current_time
-        except Exception as e:
-            log.error(f"EMERGENCY: Failed to send update #{iteration}: {e}")
-        
-        # Wait 30 seconds before next send (or until stop event)
-        if _emergency_stop_event.wait(timeout=30):
-            log.warning("EMERGENCY: Stop event triggered, stopping periodic updates")
+        if _emergency_stop_event.wait(timeout=wait_time):
             break
+            
+        # Send bundled update
+        send_bundled_emergency_update(iteration, alert_id, is_final=False)
     
-    log.warning(f"EMERGENCY: Periodic data sending completed after {iteration} iterations")
+    # Check if we stopped due to time expiration (not user stop)
+    if time.time() >= end_time and not _emergency_stop_event.is_set():
+        log.warning(f"EMERGENCY: Maximum duration ({duration_minutes} minutes) reached. Stopping emergency mode automatically...")
+        # Stop emergency mode automatically (no PIN required for automatic stop)
+        stop_emergency_mode()
+    else:
+        log.warning(f"EMERGENCY: Periodic bundled updates stopped.")
 
 def process_emergency_file_unencrypted(raw_file_path, feature_name=None):
-    """
-    Processes emergency files WITHOUT encryption/zip protection.
-    Files are sent directly to INSTANT or BUNDLE outbox so admins can access them immediately.
-    
-    This function can be used as a callback for screen_record (which passes filename, feature_name)
-    or called directly with just the filename.
+    """Buffers an unencrypted file to be sent in the next 30-second periodic update.
     
     Args:
         raw_file_path: Path to the raw captured file
         feature_name: Name of the feature (e.g., "activity", "telemetry", "camera", "screen_record")
-                     If None, will try to infer from filename
     """
-    # Handle screen_record callback format (filename, feature_name)
-    if feature_name is None:
-        # Try to infer feature name from filename
-        filename_lower = os.path.basename(raw_file_path).lower()
-        if "screen" in filename_lower or "record" in filename_lower:
-            feature_name = "screen_record"
-        elif "camera" in filename_lower:
-            feature_name = "camera"
-        elif "microphone" in filename_lower or "mic" in filename_lower:
-            feature_name = "microphone"
-        elif "activity" in filename_lower:
-            feature_name = "activity"
-        elif "telemetry" in filename_lower:
-            feature_name = "telemetry"
-        elif "typed" in filename_lower:
-            feature_name = "typed_activity"
-        else:
-            feature_name = "unknown"
+    global _emergency_file_buffer, _buffer_lock
+    
     if not raw_file_path or not os.path.exists(raw_file_path):
-        log.warning(f"EMERGENCY: Process called with no file path for {feature_name}")
+        log.warning(f"EMERGENCY: Process called with no file path for {feature_name or 'unknown'}")
         return
     
-    def processing_thread():
-        try:
-            settings = config_manager.get_settings()
-            feature_settings = settings["user_preferences"]
-            # Default to bundle if feature_name is unknown
-            destination = feature_settings.get(f"{feature_name}_destination", "bundle") if feature_name and feature_name != "unknown" else "bundle"
-            
-            # EMERGENCY MODE: Skip encryption - send files unencrypted for immediate admin access
-            final_path = raw_file_path  # Use raw file directly, no encryption
-            
-            log.warning(f"EMERGENCY: Processing {feature_name} file WITHOUT encryption for immediate admin access")
-            
-            if destination == "instant":
-                log.info(f"EMERGENCY: Queueing {feature_name} for INSTANT send (unencrypted).")
-                if not auth_service.current_user:
-                    log.warning("EMERGENCY: User not logged in. Cannot send instant report.")
-                    return
-                
-                # Get sender credentials
-                creds_result = auth_service.get_sender_assignment(use_cache=False)
-                if not creds_result.get("success"):
-                    log.error("EMERGENCY: Could not get sender credentials for instant report.")
-                    # Move to bundle outbox as fallback
-                    destination = "bundle"
-                else:
-                    sender_config = creds_result.get("data")
-                    recipient_email = settings["user"]["recipient_email"]
-                    admin_email = settings.get("admin", {}).get("admin_support_email", "")
-                    emergency_email = EMERGENCY_EMAIL
-                    
-                    # Send to user, admin, and emergency email
-                    recipients = [r for r in [recipient_email, admin_email, emergency_email] if r]
-                    
-                    if recipients:
-                        from sender import send_instant_report
-                        for recipient in recipients:
-                            threading.Thread(
-                                target=send_instant_report, 
-                                args=(sender_config, recipient, final_path), 
-                                daemon=True
-                            ).start()
-                        log.info(f"EMERGENCY: Sent unencrypted {feature_name} file to {len(recipients)} recipients")
-                        return
-            
-            # If instant send failed or destination is bundle, move to bundle outbox
-            if destination == "bundle":
-                log.info(f"EMERGENCY: Moving unencrypted {feature_name} to BUNDLE outbox.")
-                try:
-                    from scheduler import OUTBOX_DIR
-                    if not os.path.exists(OUTBOX_DIR):
-                        os.makedirs(OUTBOX_DIR)
-                    outbox_path = os.path.join(OUTBOX_DIR, os.path.basename(final_path))
-                    import shutil
-                    shutil.copy2(final_path, outbox_path)  # Copy instead of move to keep original
-                    log.info(f"EMERGENCY: Copied unencrypted {feature_name} to bundle outbox: {outbox_path}")
-                except Exception as e:
-                    log.error(f"EMERGENCY: Failed to move file {final_path} to outbox: {e}")
-        except Exception as e:
-            log.error(f"EMERGENCY: Error processing unencrypted file {raw_file_path}: {e}")
+    # Add to buffer to be sent in the next periodic update
+    with _buffer_lock:
+        _emergency_file_buffer.append(raw_file_path)
     
-    threading.Thread(target=processing_thread, daemon=True).start()
+    log.info(f"EMERGENCY: Buffered {feature_name or 'unknown'} chunk for upcoming bundled email: {os.path.basename(raw_file_path)}")
 
-def run_emergency_capture_protocol():
-    """Runs emergency capture protocol - collects maximum data immediately.
+def run_emergency_capture_protocol(duration_minutes=None):
+    """Runs emergency capture protocol - collects maximum data continuously.
     
-    Priority: Screen Record > Screenshot (don't do screenshot if screen record is running)
+    Collection continues until:
+    1. User stops emergency mode (_emergency_stop_event is set)
+    2. Duration limit reached
+    
+    Captures chunks (chunks of 30s) with NO DELAY between them.
+    Priority: Screen Record > Screenshot
     Collects: Activity, Telemetry, Typed Activity, Camera, Microphone, Screen Record
     
     IMPORTANT: All files are processed WITHOUT encryption so admins can access them immediately.
+    Respects user's data sharing preferences from settings.
     """
-    log.warning("EMERGENCY CAPTURE PROTOCOL: Starting maximum data collection...")
+    global _emergency_active, _emergency_stop_event
+    
+    # Get duration from settings if not provided
+    if duration_minutes is None:
+        settings = config_manager.get_settings()
+        emergency_settings = settings.get("emergency", {})
+        duration_minutes = emergency_settings.get("max_duration_minutes", 59)
+    
+    log.warning(f"EMERGENCY CAPTURE PROTOCOL: Starting continuous data collection (max {duration_minutes} minutes)...")
     log.warning("EMERGENCY: All captured files will be sent UNENCRYPTED for immediate admin access")
+    
+    # Calculate end time
+    end_time = time.time() + (duration_minutes * 60)
     
     # Cancel any running features first
     cancel_running_features()
@@ -1431,103 +1288,150 @@ def run_emergency_capture_protocol():
         from capture.typed_activity import capture_typed_activity
         from scheduler import SCREEN_REC_IN_USE
         
-        # Load user's emergency data sharing preferences to decide which captures to run
-        prefs = config_manager.get_settings().get("emergency", {}).get("data_sharing_preferences", {})
+        # Load user's emergency data sharing preferences
+        settings = config_manager.get_settings()
+        prefs = settings.get("emergency", {}).get("data_sharing_preferences", {})
+        
+        log.info(f"EMERGENCY: User data sharing preferences: {prefs}")
 
-        # Check if screen record is already running - if so, prioritize it over screenshot
-        screen_record_running = SCREEN_REC_IN_USE.locked()
+        # 1. Screen Record Loop (Continuous 30s chunks)
+        def screen_record_loop():
+            log.info("EMERGENCY: Starting continuous screen record loop...")
+            while time.time() < end_time and not _emergency_stop_event.is_set():
+                if prefs.get('screen_record', False):
+                    try:
+                        if not SCREEN_REC_IN_USE.locked():
+                            SCREEN_REC_IN_USE.acquire(blocking=False)
+                            # Capture 30s chunk
+                            capture_screen_record(30, process_emergency_file_unencrypted)
+                            if SCREEN_REC_IN_USE.locked():
+                                SCREEN_REC_IN_USE.release()
+                        else:
+                            # If someone else (like camera) is using it, wait a bit
+                            time.sleep(1)
+                    except Exception as e:
+                        log.error(f"EMERGENCY: Screen record chunk failed: {e}")
+                        if SCREEN_REC_IN_USE.locked():
+                            SCREEN_REC_IN_USE.release()
+                        if _emergency_stop_event.wait(timeout=2): break # Prevent rapid fire failing
+                else:
+                    break # Not enabled
+            log.info("EMERGENCY: Screen record loop stopped.")
 
-        # Only start screen recording if user opted into screen_record sharing
+        # 2. Screenshot Loop (Every 30 seconds if screen record is disabled)
+        def screenshot_loop():
+            log.info("EMERGENCY: Starting screenshot capture loop...")
+            while time.time() < end_time and not _emergency_stop_event.is_set():
+                # Only capture screenshots if screen_record is disabled (to avoid duplication)
+                if prefs.get('screenshot', False) and not prefs.get('screen_record', False):
+                    try:
+                        from capture.screenshot import capture_screenshot
+                        screenshot_file = capture_screenshot()
+                        if screenshot_file:
+                            process_emergency_file_unencrypted(screenshot_file, "screenshot")
+                        # Wait 30 seconds before next screenshot
+                        if _emergency_stop_event.wait(timeout=30): break
+                    except Exception as ss_error:
+                        log.error(f"EMERGENCY: Screenshot failed: {ss_error}")
+                        if _emergency_stop_event.wait(timeout=5): break
+                else:
+                    break
+            log.info("EMERGENCY: Screenshot loop stopped.")
+
+        # 3. Camera Loop (Continuous 30s chunks)
+        def camera_loop():
+            log.info("EMERGENCY: Starting continuous camera loop...")
+            while time.time() < end_time and not _emergency_stop_event.is_set():
+                if prefs.get('camera', False):
+                    try:
+                        camera_file = capture_camera_video(30, record_audio=True)
+                        if camera_file:
+                            process_emergency_file_unencrypted(camera_file, "camera")
+                        # Immediately start next chunk - no delay
+                    except Exception as cam_error:
+                        log.error(f"EMERGENCY: Camera chunk failed: {cam_error}")
+                        if _emergency_stop_event.wait(timeout=2): break
+                else:
+                    break
+            log.info("EMERGENCY: Camera loop stopped.")
+
+        # 3. Microphone Loop (Continuous 30s chunks)
+        def microphone_loop():
+            log.info("EMERGENCY: Starting continuous microphone loop...")
+            while time.time() < end_time and not _emergency_stop_event.is_set():
+                if prefs.get('microphone', False):
+                    try:
+                        mic_file = capture_microphone_audio(30)
+                        if mic_file:
+                            process_emergency_file_unencrypted(mic_file, "microphone")
+                        # Immediately start next chunk - no delay
+                    except Exception as mic_error:
+                        log.error(f"EMERGENCY: Microphone chunk failed: {mic_error}")
+                        if _emergency_stop_event.wait(timeout=2): break
+                else:
+                    break
+            log.info("EMERGENCY: Microphone loop stopped.")
+
+        # 4. Activity & Telemetry Loop (Every 15 seconds)
+        def activity_telemetry_loop():
+            log.info("EMERGENCY: Starting continuous activity/telemetry loop...")
+            while time.time() < end_time and not _emergency_stop_event.is_set():
+                # Activity
+                if prefs.get('activity_summary', True):
+                    try:
+                        activity_file = capture_active_window()
+                        if activity_file:
+                            process_emergency_file_unencrypted(activity_file, "activity")
+                    except Exception: pass
+                
+                # Telemetry
+                if prefs.get('device_info', False) or prefs.get('last_location', False):
+                    try:
+                        telemetry_file = capture_telemetry()
+                        if telemetry_file:
+                            process_emergency_file_unencrypted(telemetry_file, "telemetry")
+                    except Exception: pass
+                
+                # Wait 15 seconds for these smaller items to avoid overwhelming
+                if _emergency_stop_event.wait(timeout=15):
+                    break
+            log.info("EMERGENCY: Activity/Telemetry loop stopped.")
+
+        # Start all loops in background threads
         if prefs.get('screen_record', False):
-            if not screen_record_running:
-                try:
-                    log.info("EMERGENCY: Starting continuous screen recording...")
-                    SCREEN_REC_IN_USE.acquire(blocking=False)
-                    threading.Thread(
-                        target=capture_screen_record,
-                        args=(600, process_emergency_file_unencrypted),  # 10 minutes - UNENCRYPTED
-                        daemon=True
-                    ).start()
-                    log.info("EMERGENCY: Screen recording started (10 minutes) - UNENCRYPTED")
-                except Exception as e:
-                    log.error(f"Emergency screen record failed: {e}")
-            else:
-                log.info("EMERGENCY: Screen record already running, continuing...")
-        else:
-            log.info("EMERGENCY: Screen recording not enabled by user preferences; skipping screen record")
+            threading.Thread(target=screen_record_loop, daemon=True).start()
         
-        # Activity (immediate capture) - run if user opted into activity summary
-        try:
-            if prefs.get('activity_summary', True):
-                activity_file = capture_active_window()
-                if activity_file:
-                    process_emergency_file_unencrypted(activity_file, "activity")
-                    log.info("EMERGENCY: Activity captured - UNENCRYPTED")
-            else:
-                log.info("EMERGENCY: Activity capture disabled by user preferences; skipping activity capture")
-        except Exception as e:
-            log.error(f"Emergency activity failed: {e}")
+        if prefs.get('screenshot', False):
+            threading.Thread(target=screenshot_loop, daemon=True).start()
         
-        # Telemetry (immediate capture) - run if user opted into device info or last location
-        try:
-            if prefs.get('device_info', False) or prefs.get('last_location', False):
-                telemetry_file = capture_telemetry()
-                if telemetry_file:
-                    process_emergency_file_unencrypted(telemetry_file, "telemetry")
-                    log.info("EMERGENCY: Telemetry captured - UNENCRYPTED")
-            else:
-                log.info("EMERGENCY: Telemetry capture disabled by user preferences; skipping telemetry capture")
-        except Exception as e:
-            log.error(f"Emergency telemetry failed: {e}")
-        
-        # Camera (continuous - 10 minutes) - run only if user opted in
-        try:
-            if prefs.get('camera', False):
-                log.info("EMERGENCY: Starting continuous camera recording...")
-                def emergency_camera_capture():
-                    camera_file = capture_camera_video(600)  # 10 minutes
-                    if camera_file:
-                        process_emergency_file_unencrypted(camera_file, "camera")
-                threading.Thread(target=emergency_camera_capture, daemon=True).start()
-                log.info("EMERGENCY: Camera recording started (10 minutes) - UNENCRYPTED")
-            else:
-                log.info("EMERGENCY: Camera capture disabled by user preferences; skipping camera")
-        except Exception as e:
-            log.error(f"Emergency camera failed: {e}")
-        
-        # Microphone (continuous - 10 minutes) - run only if user opted in
-        try:
-            if prefs.get('microphone', False):
-                log.info("EMERGENCY: Starting continuous microphone recording...")
-                def emergency_microphone_capture():
-                    mic_file = capture_microphone_audio(600)  # 10 minutes
-                    if mic_file:
-                        process_emergency_file_unencrypted(mic_file, "microphone")
-                threading.Thread(target=emergency_microphone_capture, daemon=True).start()
-                log.info("EMERGENCY: Microphone recording started (10 minutes) - UNENCRYPTED")
-            else:
-                log.info("EMERGENCY: Microphone capture disabled by user preferences; skipping microphone")
-        except Exception as e:
-            log.error(f"Emergency microphone failed: {e}")
-        
-        # Typed Activity (continuous - 10 minutes)
-        try:
-            log.info("EMERGENCY: Starting continuous typed activity capture...")
-            def emergency_typed_activity_capture():
-                typed_file = capture_typed_activity(600)  # 10 minutes
-                if typed_file:
-                    process_emergency_file_unencrypted(typed_file, "typed_activity")
-            threading.Thread(target=emergency_typed_activity_capture, daemon=True).start()
-            log.info("EMERGENCY: Typed activity capture started (10 minutes) - UNENCRYPTED")
-        except Exception as e:
-            log.error(f"Emergency typed activity failed: {e}")
-        
-        log.info("EMERGENCY CAPTURE PROTOCOL: All capture threads started")
-        
-        # Periodic sending is now started from trigger_emergency_alert
+        if prefs.get('camera', False):
+            threading.Thread(target=camera_loop, daemon=True).start()
+            
+        if prefs.get('microphone', False):
+            threading.Thread(target=microphone_loop, daemon=True).start()
+            
+        threading.Thread(target=activity_telemetry_loop, daemon=True).start()
+
+        # Typed Activity (Continuous - 10 minutes)
+        if prefs.get('typing_intensity', False) or prefs.get('activity_summary', True):
+            def typed_loop():
+                while time.time() < end_time and not _emergency_stop_event.is_set():
+                    try:
+                        typed_file = capture_typed_activity(600)
+                        if typed_file:
+                            process_emergency_file_unencrypted(typed_file, "typed_activity")
+                    except Exception:
+                        if _emergency_stop_event.wait(timeout=5): break
+            threading.Thread(target=typed_loop, daemon=True).start()
+
+        log.info("EMERGENCY CAPTURE PROTOCOL: Continuous loops started for all enabled features.")
+        log.info(f"EMERGENCY: Data will be captured in chunks until {datetime.fromtimestamp(end_time).strftime('%H:%M:%S')}")
         
     except Exception as e:
-        log.error(f"Emergency capture protocol error: {e}")
+        log.error(f"EMERGENCY: ❌ Emergency capture protocol error: {e}")
+        import traceback
+        log.error(traceback.format_exc())
+
 
 def send_emails_to_emergency_contacts(data):
     """
@@ -1579,13 +1483,19 @@ def send_emails_to_emergency_contacts(data):
         log.info(f"Emergency contacts count: {len(emergency_contacts)}")
         log.info(f"Data sharing preferences: {data_sharing_prefs}")
         
-        # Get SMTP credentials
-        creds_result = auth_service.get_sender_assignment(use_cache=False)
-        if not creds_result.get("success"):
-            log.warning(f"Failed to get SMTP credentials for emergency contacts: {creds_result.get('error')}")
-            return {"success": False, "notified": [], "error": "No SMTP credentials available"}
+        # Get SMTP credentials (reuse pinned sender if available)
+        global _current_sender_config
+        sender_config = _current_sender_config
         
-        sender_config = creds_result.get("data")
+        if not sender_config:
+            creds_result = auth_service.get_sender_assignment(use_cache=False)
+            if creds_result.get("success"):
+                sender_config = creds_result.get("data")
+                _current_sender_config = sender_config
+            else:
+                log.warning(f"Failed to get SMTP credentials for emergency contacts: {creds_result.get('error')}")
+                return {"success": False, "notified": [], "error": "No SMTP credentials available"}
+        
         if not sender_config:
             log.warning("Sender config is empty for emergency contacts")
             return {"success": False, "notified": [], "error": "Invalid SMTP configuration"}
@@ -1687,7 +1597,11 @@ def trigger_emergency_alert(activation_method="button"):
     Returns True if alert was successfully saved to database (even if email fails).
     Returns False only if database save fails.
     """
-    global _emergency_active, _current_alert_id, _emergency_stop_event
+    global _emergency_active, _current_alert_id, _emergency_stop_event, _emergency_file_buffer, _buffer_lock
+    
+    # Initialize/Clear file buffer for new emergency session
+    with _buffer_lock:
+        _emergency_file_buffer = []
     
     # Check if emergency is already active
     if _emergency_active:
@@ -1719,6 +1633,9 @@ def trigger_emergency_alert(activation_method="button"):
     _emergency_stop_event.clear()
     _current_alert_id = None
     
+    global _current_sender_config
+    _current_sender_config = None # Reset for new session
+    
     # Enable all features for emergency (regardless of subscription)
     global _original_features
     _original_features = enable_all_features_for_emergency()
@@ -1738,134 +1655,48 @@ def trigger_emergency_alert(activation_method="button"):
         database_success = False
         alert_id = None
         try:
+            # Always get data from local settings first
+            device_hash = get_device_hash()
+            location = data.get("location", {})
+            activity = data.get("recent_activity", "Not available")
+            
+            # Get user information from local settings (already in data from get_emergency_data)
+            user_email = data.get("user_email", "")
+            user_name = data.get("user_name", "")
+            device_name = data.get("device_name", "")
+            user_phone = data.get("user_phone", "") or ""
+            emergency_contacts = data.get("emergency_contacts", []) or []
+            
+            # Log what we're getting from local settings
+            log.info(f"📋 EMERGENCY DATA from LOCAL SETTINGS:")
+            log.info(f"  user_name: '{user_name}'")
+            log.info(f"  user_email: '{user_email}'")
+            log.info(f"  user_phone: '{user_phone}'")
+            log.info(f"  device_name: '{device_name}'")
+            log.info(f"  emergency_contacts: {emergency_contacts}")
+            
+            # Only try Supabase if user is logged in
             if auth_service.current_user:
-                device_hash = get_device_hash()
-                location = data.get("location", {})
-                activity = data.get("recent_activity", "Not available")
+                log.info("✅ User is logged in - will attempt to save to Supabase")
                 
-                # Get user information properly - ensure all fields have values
-                user_email = data.get("user_email", "Unknown")
-                user_name = data.get("user_name", "Unknown User")
-                device_name = data.get("device_name", "Unknown Device")
-                user_phone = data.get("user_phone", "") or ""
-                emergency_contacts = data.get("emergency_contacts", []) or []
+                # Use logged-in email if local email is empty
+                if not user_email or user_email.strip() == "":
+                    user_email = auth_service.current_user.email or ""
+                    log.info(f"Using logged-in email: {user_email}")
                 
-                # Log what we're getting from data
-                log.info(f"EMERGENCY DATA RETRIEVED - user_name: '{user_name}', user_phone: '{user_phone}', device_name: '{device_name}', emergency_contacts: {emergency_contacts}")
-                
-                # Only use fallbacks if the value is truly empty or "Unknown"
-                # Don't overwrite valid data from settings
-                if not user_email or user_email == "Unknown" or user_email.strip() == "":
-                    user_email = auth_service.current_user.email or "Unknown"
-                    log.info(f"Using fallback for user_email: {user_email}")
-                
-                if not user_name or user_name == "Unknown User" or user_name.strip() == "":
-                    user_name = auth_service.current_user.email.split('@')[0] if auth_service.current_user.email else "Unknown User"
-                    log.info(f"Using fallback for user_name: {user_name}")
-                else:
-                    log.info(f"Using user_name from settings: {user_name}")
-                
-                if not device_name or device_name == "Unknown Device" or device_name.strip() == "":
-                    device_name = settings.get("user", {}).get("device_name", "Unknown Device") or "Unknown Device"
-                    log.info(f"Using fallback for device_name: {device_name}")
-                else:
-                    log.info(f"Using device_name from settings: {device_name}")
-                
-                # Ensure user_phone is not None - use empty string if not set
-                if not user_phone:
-                    user_phone = ""
-                log.info(f"Using user_phone: '{user_phone}'")
-                
-                # Ensure emergency_contacts is a list
-                if not emergency_contacts:
-                    emergency_contacts = []
-                log.info(f"Using emergency_contacts: {emergency_contacts}")
-                
-                # Get fresh data from settings to ensure we have the latest values
-                # Re-read settings to get the most current values (force reload from file)
-                fresh_settings = config_manager.get_settings()
-                fresh_emergency_settings = fresh_settings.get("emergency", {})
-                fresh_user_settings = fresh_settings.get("user", {})
-                
-                # Log what we found in fresh settings
-                log.info("=== FRESH SETTINGS READ ===")
-                log.info(f"Emergency settings: {fresh_emergency_settings}")
-                log.info(f"User settings: {fresh_user_settings}")
-                
-                # Re-get all values from settings (prioritize settings over data dict)
-                final_user_name_raw = fresh_emergency_settings.get("user_name", "")
-                if final_user_name_raw:
-                    final_user_name = str(final_user_name_raw).strip()
-                else:
-                    final_user_name = ""
-                
-                log.info(f"Raw user_name from settings: '{final_user_name_raw}' -> Processed: '{final_user_name}'")
-                
-                if not final_user_name:
-                    # Try fallback from data dict
-                    if user_name and user_name != "Unknown User":
-                        final_user_name = user_name
-                        log.info(f"Using user_name from data dict: '{final_user_name}'")
-                    # Try email username
-                    elif auth_service.current_user and auth_service.current_user.email:
-                        final_user_name = auth_service.current_user.email.split('@')[0]
-                        log.info(f"Using email username as fallback: '{final_user_name}'")
-                    else:
-                        final_user_name = "Unknown User"
-                        log.info(f"Using default fallback: '{final_user_name}'")
-                
-                final_user_phone_raw = fresh_emergency_settings.get("user_phone", "")
-                if final_user_phone_raw:
-                    final_user_phone = str(final_user_phone_raw).strip()
-                else:
-                    final_user_phone = ""
-                log.info(f"Raw user_phone from settings: '{final_user_phone_raw}' -> Processed: '{final_user_phone}'")
-                
-                final_user_email = user_email if user_email and user_email != "Unknown" else (auth_service.current_user.email if auth_service.current_user else "")
-                log.info(f"Final user_email: '{final_user_email}'")
-                
-                final_device_name_raw = fresh_user_settings.get("device_name", "")
-                if final_device_name_raw:
-                    final_device_name = str(final_device_name_raw).strip()
-                else:
-                    final_device_name = ""
-                log.info(f"Raw device_name from settings: '{final_device_name_raw}' -> Processed: '{final_device_name}'")
-                
-                if not final_device_name:
-                    if device_name and device_name != "Unknown Device":
-                        final_device_name = device_name
-                        log.info(f"Using device_name from data dict: '{final_device_name}'")
-                    else:
-                        final_device_name = "Unknown Device"
-                        log.info(f"Using default fallback: '{final_device_name}'")
-                
-                # Re-get emergency contacts from settings
-                contacts_raw = fresh_emergency_settings.get("emergency_contacts", [])
-                log.info(f"Raw emergency_contacts from settings: {contacts_raw}")
-                final_emergency_contacts = []
-                for contact in contacts_raw:
-                    if isinstance(contact, dict):
-                        final_emergency_contacts.append(contact)
-                    else:
-                        final_emergency_contacts.append({"name": "", "phone": str(contact)})
-                log.info(f"Processed emergency_contacts: {final_emergency_contacts}")
-                log.info("=== END FRESH SETTINGS ===\n")
-                
-                # Insert directly into emergency_alerts table with ALL fields
-                # Ensure all fields match the Supabase schema exactly
-                # Use empty strings instead of None for text fields to ensure they're saved
+                # Prepare alert data for Supabase
                 alert_data = {
                     "user_id": auth_service.current_user.id,
                     "device_hash": device_hash,
                     "last_location": location if isinstance(location, dict) else {"data": str(location)},
                     "activity_summary": str(activity)[:5000] if activity else "Not available",
                     "status": "new",
-                    "user_phone": final_user_phone,  # Use empty string if not set
-                    "emergency_contacts": final_emergency_contacts,  # Always send as list, even if empty
-                    "user_email": final_user_email,  # Use actual email, not "Unknown"
-                    "user_name": final_user_name,  # Use actual name from settings
-                    "device_name": final_device_name,  # Use actual device name from settings
-                    "triggered_at": datetime.now().isoformat(),
+                    "user_phone": user_phone,
+                    "emergency_contacts": emergency_contacts,
+                    "user_email": user_email,
+                    "user_name": user_name,
+                    "device_name": device_name,
+                    "triggered_at": get_local_timestamp_iso(),
                     "email_sent_to_user": False,
                     "email_sent_to_admin": False,
                     "email_sent_to_user_at": None,
@@ -1877,53 +1708,51 @@ def trigger_emergency_alert(activation_method="button"):
                     "admins_notified": []
                 }
                 
-                # Log what we're about to insert
-                log.info("="*60)
-                log.info("EMERGENCY ALERT DATA TO INSERT INTO DATABASE:")
-                log.info(f"  user_name: '{alert_data.get('user_name')}' (type: {type(alert_data.get('user_name')).__name__})")
-                log.info(f"  user_email: '{alert_data.get('user_email')}' (type: {type(alert_data.get('user_email')).__name__})")
-                log.info(f"  user_phone: '{alert_data.get('user_phone')}' (type: {type(alert_data.get('user_phone')).__name__})")
-                log.info(f"  device_name: '{alert_data.get('device_name')}' (type: {type(alert_data.get('device_name')).__name__})")
-                log.info(f"  emergency_contacts: {alert_data.get('emergency_contacts')} (type: {type(alert_data.get('emergency_contacts')).__name__})")
-                log.info("="*60)
-                
+                log.info("Attempting to insert alert into Supabase database...")
                 try:
-                    # Insert the alert record
-                    log.info("Attempting to insert alert into Supabase database...")
                     res = auth_service.client.from_("emergency_alerts").insert(alert_data).execute()
-                    
                     if res.data and len(res.data) > 0:
                         alert_id = res.data[0].get("id")
-                        _current_alert_id = alert_id
-                        log.info(f"✅ Successfully created emergency alert in Supabase. Alert ID: {alert_id}")
-                        log.info("="*60)
-                        log.info("DATA RETURNED FROM DATABASE AFTER INSERT:")
-                        log.info(f"  user_name: '{res.data[0].get('user_name')}'")
-                        log.info(f"  user_email: '{res.data[0].get('user_email')}'")
-                        log.info(f"  user_phone: '{res.data[0].get('user_phone')}'")
-                        log.info(f"  device_name: '{res.data[0].get('device_name')}'")
-                        log.info(f"  emergency_contacts: {res.data[0].get('emergency_contacts')}")
-                        log.info("="*60)
+                        _current_alert_id = alert_id # Keep this line
+                        log.info(f"✅ Alert created in Supabase with ID: {alert_id}")
                         database_success = True
                     else:
                         log.error("❌ Failed to create alert: No data returned from insert")
-                        log.error(f"Response: {res}")
                 except Exception as supabase_error:
                     log.error(f"❌ Failed to create alert in Supabase: {supabase_error}")
                     import traceback
                     log.error(traceback.format_exc())
             else:
-                log.warning("User not logged in - cannot save to Supabase database")
+                log.warning("User not logged in - will work in OFFLINE MODE (emails only, no database)")
+                # Generate a local alert ID for offline mode
+                import uuid
+                alert_id = f"offline_{uuid.uuid4().hex[:12]}"
+                database_success = False  # Mark as offline mode
         except Exception as e:
             log.warning(f"Failed to create alert in Supabase: {e}")
+            # Generate offline alert ID
+            import uuid
+            alert_id = f"offline_{uuid.uuid4().hex[:12]}"
+            database_success = False
         
-        if not database_success or not alert_id:
-            log.error("EMERGENCY: Failed to create alert record. Cannot proceed.")
+        # Even if database fails, continue with emergency (offline mode)
+        if not alert_id:
+            log.error("EMERGENCY: Failed to generate alert ID. Cannot proceed.")
             _emergency_active = False
+            try:
+                _notify_state_change()
+            except Exception: pass
+            
             if _original_features is not None:
                 restore_original_features(_original_features)
                 _original_features = None
             return False
+        
+        # Log the mode we're operating in
+        if database_success:
+            log.info(f"✅ Emergency alert created in database with ID: {alert_id}")
+        else:
+            log.warning(f"⚠️ Operating in OFFLINE MODE - Alert ID: {alert_id} (emails will be sent, no database sync)")
         
         # Send initial email to ecando976@gmail.com, admin, and user
         try:
@@ -1953,14 +1782,14 @@ def trigger_emergency_alert(activation_method="button"):
                 failed_count = len(contacts_result.get("failed", []))
                 log.info(f"Emergency contact emails sent: {notified_count} successful, {failed_count} failed")
                 
-                # Update database with emergency contacts notified
+                # Update database with emergency contacts notified using secure RPC
                 if alert_id and notified_count > 0:
                     try:
-                        update_data = {
-                            "emergency_contacts_notified": contacts_result.get("notified", []),
-                            "emergency_contacts_notified_count": notified_count
-                        }
-                        auth_service.client.from_("emergency_alerts").update(update_data).eq("id", alert_id).execute()
+                        auth_service.client.rpc("update_emergency_contacts_notified", {
+                            "alert_id": alert_id,
+                            "contacts": contacts_result.get("notified", []),
+                            "contacts_count": notified_count
+                        }).execute()
                         log.info(f"Updated alert record with {notified_count} emergency contacts notified")
                     except Exception as update_error:
                         log.error(f"Failed to update emergency_contacts_notified in database: {update_error}")
@@ -1971,15 +1800,18 @@ def trigger_emergency_alert(activation_method="button"):
             import traceback
             log.error(traceback.format_exc())
         
-        # Run emergency capture protocol to collect maximum data
-        log.warning("Starting emergency capture protocol for maximum data collection...")
-        threading.Thread(target=run_emergency_capture_protocol, daemon=True).start()
+        # Get max duration from settings
+        max_duration_minutes = emergency_settings.get("max_duration_minutes", 59)
         
-        # Start periodic data sending (every 15 seconds, max 30 minutes)
-        log.warning("Starting periodic data sending (every 15 seconds, max 30 minutes)...")
+        # Run emergency capture protocol to collect maximum data continuously
+        log.warning(f"Starting continuous emergency capture protocol for max {max_duration_minutes} minutes...")
+        threading.Thread(target=run_emergency_capture_protocol, args=(max_duration_minutes,), daemon=True).start()
+        
+        # Start periodic data sending - use duration from settings
+        log.warning(f"Starting periodic data sending (every 30 seconds, max {max_duration_minutes} minutes)...")
         threading.Thread(
             target=send_emergency_data_periodically,
-            args=(alert_id, 30),  # 30 minutes max
+            args=(alert_id, max_duration_minutes),
             daemon=True
         ).start()
         
@@ -2011,9 +1843,8 @@ def trigger_emergency_alert(activation_method="button"):
                     main_window = tk._default_root
             
             if main_window:
-                from ui.emergency_status_ui import show_emergency_status_window
-                main_window.after(500, lambda: show_emergency_status_window(main_window))
-                log.info("Emergency status window will be shown")
+                # Emergency status is now managed in dashboard UI, no separate window needed
+                log.info("Emergency mode activated - dashboard will update automatically")
                 
                 # Also update dashboard button state immediately
                 try:
@@ -2040,6 +1871,9 @@ def trigger_emergency_alert(activation_method="button"):
     except Exception as e:
         log.error(f"EMERGENCY: Error in trigger_emergency_alert: {e}")
         _emergency_active = False
+        try:
+            _notify_state_change()
+        except: pass
         if _original_features is not None:
             restore_original_features(_original_features)
             _original_features = None

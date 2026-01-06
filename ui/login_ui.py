@@ -24,6 +24,12 @@ class LoginFrame(tk.Frame):
         self.entry_pass = ttk.Entry(self, width=40, show="*")
         self.entry_pass.grid(row=4, column=0, padx=50, pady=5)
         
+        # --- Remember Me Checkbox ---
+        self.var_remember = tk.BooleanVar()
+        self.chk_remember = ttk.Checkbutton(self, text="Remember my credentials", variable=self.var_remember)
+        self.chk_remember.grid(row=5, column=0, pady=5)
+        # ----------------------------
+        
         btn_frame = ttk.Frame(self)
         btn_frame.grid(row=6, column=0, pady=20)
         
@@ -41,6 +47,9 @@ class LoginFrame(tk.Frame):
         self.lbl_forgot = ttk.Label(self, text="Forgot Password?", foreground="blue", cursor="hand2")
         self.lbl_forgot.grid(row=9, column=0, pady=5)
         self.lbl_forgot.bind("<Button-1>", self.handle_forgot_password)
+        
+        # Load saved credentials if any
+        self.load_saved_credentials()
 
     def set_status_message(self, message, color):
         self.lbl_status.config(text=message, foreground=color)
@@ -48,6 +57,69 @@ class LoginFrame(tk.Frame):
     def set_emergency_mode(self):
         # Emergency mode removed; do not trigger alerts on login
         self.lbl_status.config(text="", foreground="red")
+
+    def check_emergency_auto_login(self):
+        """If started in emergency mode and credentials exist, auto-login"""
+        if getattr(self.controller, 'start_in_emergency_mode', False):
+            if self.entry_email.get() and self.entry_pass.get():
+                log.info("Emergency Mode: Auto-logging in via saved credentials...")
+                self.handle_login()
+        
+    def load_saved_credentials(self):
+        try:
+            from config import config_manager
+            import base64
+            
+            settings = config_manager.get_settings()
+            saved = settings.get("saved_credentials", {})
+            
+            if saved.get("remember", False):
+                email = saved.get("email", "")
+                enc_pass = saved.get("password_b64", "")
+                
+                if email:
+                    self.entry_email.delete(0, tk.END)
+                    self.entry_email.insert(0, email)
+                    self.var_remember.set(True)
+                
+                if enc_pass:
+                    try:
+                        password = base64.b64decode(enc_pass).decode("utf-8")
+                        self.entry_pass.delete(0, tk.END)
+                        self.entry_pass.insert(0, password)
+                    except:
+                        pass
+            
+            # Check for auto-login after loading
+            self.after(500, self.check_emergency_auto_login)
+            
+        except Exception as e:
+            log.warning(f"Failed to load saved credentials: {e}")
+
+    def save_credentials(self, email, password):
+        try:
+            from config import config_manager
+            import base64
+            
+            settings = config_manager.get_settings()
+            
+            if self.var_remember.get():
+                pass_b64 = base64.b64encode(password.encode("utf-8")).decode("utf-8")
+                settings["saved_credentials"] = {
+                    "remember": True,
+                    "email": email,
+                    "password_b64": pass_b64
+                }
+            else:
+                settings["saved_credentials"] = {
+                    "remember": False,
+                    "email": "",
+                    "password_b64": ""
+                }
+            
+            config_manager.save_settings()
+        except Exception as e:
+            log.error(f"Failed to save credentials: {e}")
 
     def handle_forgot_password(self, event=None):
         email = self.entry_email.get()
@@ -63,7 +135,19 @@ class LoginFrame(tk.Frame):
         else:
             raw_error = str(result.get('error', 'Unknown error'))
             log.error(f"Password reset failed: {raw_error}")
-            self.lbl_status.config(text="Error sending reset link.", foreground="red")
+            
+            if "security purposes" in raw_error and "seconds" in raw_error:
+                # Extract seconds using regex or simple split
+                try:
+                    import re
+                    match = re.search(r"after (\d+) seconds", raw_error)
+                    seconds = match.group(1) if match else "a few"
+                    messagebox.showwarning("Wait a moment", f"Please wait {seconds} seconds before requesting another email.")
+                    self.lbl_status.config(text=f"Please wait {seconds}s...", foreground="orange")
+                except:
+                    messagebox.showwarning("Too Fast", "Please wait a minute before requesting another email.")
+            else:
+                self.lbl_status.config(text="Error sending reset link.", foreground="red")
 
     def handle_login(self):
         from .dashboard_ui import DashboardFrame
@@ -83,6 +167,9 @@ class LoginFrame(tk.Frame):
         
         if result.get("success"):
             self.lbl_status.config(text="")
+            
+            # Save credentials if checked
+            self.save_credentials(email, password)
             
             sub_data = result.get("subscription")
             

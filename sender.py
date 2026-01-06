@@ -9,7 +9,9 @@ import threading
 import shutil
 from logger_setup import log
 
-INSTANT_OUTBOX_DIR = "instant_outbox"
+from config import DATA_DIR
+
+INSTANT_OUTBOX_DIR = os.path.join(DATA_DIR, "instant_outbox")
 
 # --- Admin Log Sender Function (Unchanged) ---
 def send_support_log(sender_config, admin_email, log_file_path):
@@ -63,7 +65,7 @@ def send_feedback_email(sender_config, admin_email, user_email, feedback_message
         msg.attach(MIMEText(body, 'plain'))
 
         # Attach the log file
-        if os.path.exists(log_file_path):
+        if log_file_path and os.path.exists(log_file_path):
             with open(log_file_path, "rb") as f:
                 part = MIMEApplication(f.read(), Name=os.path.basename(log_file_path))
             part['Content-Disposition'] = f'attachment; filename="emoniter.log"'
@@ -148,6 +150,9 @@ def send_bundled_report(sender_config, recipient_email, file_list, device_name):
         body = (
             f"Attached is your bundled eMonitor report.\n\n"
             f"This email contains {len(file_list)} data files.\n\n"
+            "NOTE: Password-protected ZIP files utilize AES-256 encryption for maximum security.\n"
+            "The standard Windows extractor might show an error.\n"
+            "Please use 7-Zip (Windows) or Keka/The Unarchiver (Mac) to open them.\n\n"
             "- eMonitor"
         )
         msg = MIMEMultipart()

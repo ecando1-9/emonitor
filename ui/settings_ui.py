@@ -5,6 +5,7 @@ import re
 import os
 import persistence
 from auth import auth_service
+from validators import validate_email, validate_phone, validate_name
 
 # --- !! HELPER DICTIONARY TO MAP CONFIG NAMES TO DATABASE FEATURE NAMES !! ---
 # This maps local config keys (screenshot) to database feature names (SCREENSHOT)
@@ -14,9 +15,23 @@ CONFIG_TO_DB_MAP = {
     "activity": "ACTIVITY_SUMMARY",  # Also accepts ADVANCED_ACTIVITY
     "typed_activity": "TYPING_INTENSITY",
     "camera": "CAMERA",
+    "camera_photo": "SCREENSHOT",
     "microphone": "MICROPHONE",
     "screen_record": "SCREEN_RECORD"
 }
+
+# Validation functions for input fields
+def validate_digits_only(P):
+    """Validate that input contains only digits"""
+    if P == "":
+        return True
+    return P.isdigit()
+
+def validate_pin(P):
+    """Validate PIN: only 4 digits"""
+    if P == "":
+        return True
+    return P.isdigit() and len(P) <= 4
 
 class SettingsFrame(tk.Frame):
     def __init__(self, parent, controller):
@@ -109,7 +124,14 @@ class SettingsFrame(tk.Frame):
         phone_frame = ttk.Frame(emergency_frame)
         phone_frame.pack(fill="x", padx=20, pady=5)
         
-        self.entry_user_phone = self._create_entry_row(phone_frame, "Your Phone Number:", self.settings.get("emergency", {}).get("user_phone", ""))
+        # Phone validation: only digits
+        vcmd_phone = (self.register(validate_digits_only), '%P')
+        self.entry_user_phone = self._create_entry_row(
+            phone_frame, 
+            "Your Phone Number:", 
+            self.settings.get("emergency", {}).get("user_phone", ""),
+            validate_cmd=vcmd_phone
+        )
         
         # Emergency email field
         email_frame = ttk.Frame(emergency_frame)
@@ -166,7 +188,7 @@ class SettingsFrame(tk.Frame):
         
         info_label = ttk.Label(
             pin_frame, 
-            text="When you double-click the Emergency Alert desktop shortcut, you will be asked to enter this PIN. This protects against accidental activation.",
+            text="Set your Emergency Mode deactivation code.",
             font=("Arial", 9),
             foreground="blue",
             wraplength=500
@@ -177,7 +199,18 @@ class SettingsFrame(tk.Frame):
         pin_input_frame.pack(fill="x")
         
         ttk.Label(pin_input_frame, text="PIN:").pack(side="left", padx=(0, 5))
-        self.entry_emergency_pin = ttk.Entry(pin_input_frame, width=10, show="*", font=("Arial", 12), justify="center")
+        
+        # PIN validation: only 4 digits
+        vcmd_pin = (self.register(validate_pin), '%P')
+        self.entry_emergency_pin = ttk.Entry(
+            pin_input_frame, 
+            width=10, 
+            show="*", 
+            font=("Arial", 12), 
+            justify="center",
+            validate="key",
+            validatecommand=vcmd_pin
+        )
         self.entry_emergency_pin.pack(side="left", padx=(0, 10))
         # Update button for Emergency PIN — user must click to save/confirm PIN
         btn_update_pin = ttk.Button(pin_input_frame, text="Update PIN", command=self.update_emergency_pin)
@@ -186,6 +219,104 @@ class SettingsFrame(tk.Frame):
         # Single PIN entry for desktop shortcut (4 digits)
         self.lbl_emergency_pin_status = ttk.Label(pin_frame, text="", font=("Arial", 9))
         self.lbl_emergency_pin_status.pack(anchor="w", pady=(10, 0))
+        
+        # Email Update Interval Setting
+        interval_frame = ttk.LabelFrame(emergency_frame, text="📧 Email Update Interval", padding=10)
+        interval_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Description
+        ttk.Label(
+            interval_frame,
+            text="How often should emergency emails be sent during active emergency mode?",
+            font=("Arial", 10),
+            wraplength=500
+        ).pack(anchor="w", pady=(0, 10))
+        
+        # Current value label
+        self.email_interval_value_var = tk.StringVar(value="30 seconds")
+        ttk.Label(
+            interval_frame,
+            textvariable=self.email_interval_value_var,
+            font=("Arial", 12, "bold"),
+            foreground="#2196F3"
+        ).pack(pady=(0, 5))
+        
+        # Slider
+        self.email_interval_var = tk.IntVar(value=30)
+        
+        def update_interval_label(val):
+            seconds = int(float(val))
+            if seconds < 60:
+                self.email_interval_value_var.set(f"{seconds} seconds")
+            else:
+                minutes = seconds // 60
+                remaining_secs = seconds % 60
+                if remaining_secs == 0:
+                    self.email_interval_value_var.set(f"{minutes} minute{'s' if minutes > 1 else ''}")
+                else:
+                    self.email_interval_value_var.set(f"{minutes}m {remaining_secs}s")
+        
+        slider = ttk.Scale(
+            interval_frame,
+            from_=30,
+            to=300,
+            orient="horizontal",
+            variable=self.email_interval_var,
+            command=update_interval_label
+        )
+        slider.pack(fill="x", padx=20)
+        
+        # Min/Max labels
+        limits_frame = ttk.Frame(interval_frame)
+        limits_frame.pack(fill="x", padx=20)
+        
+        ttk.Label(
+            limits_frame,
+            text="⚡ 30 sec (Fast)",
+            font=("Arial", 8),
+            foreground="green"
+        ).pack(side="left")
+        
+        ttk.Label(
+            limits_frame,
+            text="🐢 5 min (Slow)",
+            font=("Arial", 8),
+            foreground="orange"
+        ).pack(side="right")
+        
+        # Recommendations
+        rec_frame = ttk.Frame(interval_frame)
+        rec_frame.pack(fill="x", pady=10)
+        
+        ttk.Label(
+            rec_frame,
+            text="💡 Recommendations:",
+            font=("Arial", 9, "bold")
+        ).pack(anchor="w")
+        
+        recommendations = [
+            "• 30 seconds: Fast updates (recommended for critical situations)",
+            "• 60 seconds: Balanced (good for most emergencies)",
+            "• 120 seconds: Battery saving mode",
+            "• 300 seconds: Maximum interval (5 minutes)"
+        ]
+        
+        for rec in recommendations:
+            ttk.Label(
+                rec_frame,
+                text=rec,
+                font=("Arial", 8),
+                foreground="#666"
+            ).pack(anchor="w", padx=20)
+        
+        # Warning
+        ttk.Label(
+            interval_frame,
+            text="⚠️ Shorter intervals = More emails. 30 sec allows proper data collection per email.",
+            font=("Arial", 8, "italic"),
+            foreground="#FF6B00",
+            wraplength=500
+        ).pack(pady=(10, 0))
         
         # Data Sharing Preferences for Emergency Alerts
         data_sharing_frame = ttk.LabelFrame(emergency_frame, text="Emergency Alert Data Sharing Preferences")
@@ -254,6 +385,32 @@ class SettingsFrame(tk.Frame):
                    text="Screen Recording - Include short screen recording",
                    variable=self.data_sharing_prefs['screen_record']).pack(anchor="w", padx=20, pady=3)
         
+        # Emergency Mode Duration Setting
+        duration_frame = ttk.Frame(emergency_frame)
+        duration_frame.pack(fill="x", padx=20, pady=10)
+        
+        ttk.Label(duration_frame, text="Emergency Mode Duration (if not stopped manually):", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        
+        duration_input_frame = ttk.Frame(duration_frame)
+        duration_input_frame.pack(fill="x")
+        
+        self.emergency_duration_value = tk.StringVar(value=str(self.settings.get("emergency", {}).get("max_duration_minutes", 59)))
+        self.emergency_duration_unit = tk.StringVar(value=self.settings.get("emergency", {}).get("duration_unit", "minutes"))
+        
+        ttk.Label(duration_input_frame, text="Duration:").pack(side="left", padx=(0, 5))
+        self.entry_emergency_duration = ttk.Entry(duration_input_frame, width=10, textvariable=self.emergency_duration_value)
+        self.entry_emergency_duration.pack(side="left", padx=5)
+        
+        ttk.Label(duration_input_frame, text="Unit:").pack(side="left", padx=(10, 5))
+        duration_unit_combo = ttk.Combobox(duration_input_frame, width=10, textvariable=self.emergency_duration_unit, 
+                                          values=["minutes", "hours"], state="readonly")
+        duration_unit_combo.pack(side="left", padx=5)
+        
+        info_label = ttk.Label(duration_frame, 
+                              text="Emergency mode will automatically stop after this duration if not manually stopped. Default: 59 minutes.",
+                              font=("Arial", 9), foreground="gray", wraplength=500)
+        info_label.pack(anchor="w", pady=(5, 0))
+        
         persistence_frame = ttk.LabelFrame(self.scrollable_frame, text="Startup Settings")
         persistence_frame.pack(fill="x", padx=20, pady=10)
         self.startup_var = tk.BooleanVar()
@@ -301,9 +458,10 @@ class SettingsFrame(tk.Frame):
         self.feature_widgets["telemetry"] = self._create_feature_row(self.feature_frame, "Telemetry (Location/CPU/RAM/etc)", "telemetry")
         self.feature_widgets["activity"] = self._create_feature_row(self.feature_frame, "Activity (Window Title)", "activity")
         self.feature_widgets["typed_activity"] = self._create_feature_row(self.feature_frame, "Typed-Activity (Count)", "typed_activity", duration_label="Gather (sec):")
-        self.feature_widgets["camera"] = self._create_feature_row(self.feature_frame, "Camera Recording", "camera", duration_label="Duration (sec):")
-        self.feature_widgets["microphone"] = self._create_feature_row(self.feature_frame, "Microphone Recording", "microphone", duration_label="Duration (sec):")
+        self.feature_widgets["camera_photo"] = self._create_feature_row(self.feature_frame, "Camera Snapshot (Image)", "camera_photo")
         self.feature_widgets["screen_record"] = self._create_feature_row(self.feature_frame, "Screen Recording", "screen_record", duration_label="Duration (min):")
+        self.feature_widgets["microphone"] = self._create_feature_row(self.feature_frame, "Microphone Recording", "microphone", duration_label="Duration (sec):")
+        self.feature_widgets["camera"] = self._create_feature_row(self.feature_frame, "Camera Recording", "camera", duration_label="Duration (sec):")
         
         button_frame = ttk.Frame(self.scrollable_frame)
         button_frame.pack(pady=20)
@@ -510,12 +668,22 @@ class SettingsFrame(tk.Frame):
             return True
         return False
 
-    def _create_entry_row(self, parent, label, default_value, show=None):
+
+    def _create_entry_row(self, parent, label, default_value, show=None, validate_cmd=None):
+        """Create entry row with optional validation"""
         frame = ttk.Frame(parent)
         frame.pack(fill="x", padx=10, pady=5)
         lbl = ttk.Label(frame, text=label, width=20)
         lbl.pack(side="left")
-        entry = ttk.Entry(frame, width=40, show=show)
+        
+        entry_kwargs = {"width": 40}
+        if show:
+            entry_kwargs["show"] = show
+        if validate_cmd:
+            entry_kwargs["validate"] = "key"
+            entry_kwargs["validatecommand"] = validate_cmd
+        
+        entry = ttk.Entry(frame, **entry_kwargs)
         entry.insert(0, default_value)
         entry.pack(side="left", fill="x", expand=True, padx=5)
         return entry
@@ -733,6 +901,21 @@ class SettingsFrame(tk.Frame):
             self.emergency_contacts_listbox.insert(tk.END, display)
         self.toggle_emergency_settings()
         
+        # Load email interval setting
+        email_interval = emergency_cfg.get("email_interval_seconds", 30)
+        self.email_interval_var.set(email_interval)
+        # Update the label
+        seconds = email_interval
+        if seconds < 60:
+            self.email_interval_value_var.set(f"{seconds} seconds")
+        else:
+            minutes = seconds // 60
+            remaining_secs = seconds % 60
+            if remaining_secs == 0:
+                self.email_interval_value_var.set(f"{minutes} minute{'s' if minutes > 1 else ''}")
+            else:
+                self.email_interval_value_var.set(f"{minutes}m {remaining_secs}s")
+        
         # Update shortcut status
         try:
             from desktop_shortcut import check_shortcut_exists
@@ -819,6 +1002,80 @@ class SettingsFrame(tk.Frame):
 
     def handle_save(self):
         try:
+            # Validate emergency email
+            emergency_email = self.entry_emergency_email.get().strip()
+            if emergency_email:
+                is_valid, error = validate_email(emergency_email)
+                if not is_valid:
+                    messagebox.showerror("Invalid Emergency Email", error)
+                    return
+            
+            # Validate user phone
+            user_phone = self.entry_user_phone.get().strip()
+            if user_phone:
+                is_valid, error = validate_phone(user_phone)
+                if not is_valid:
+                    messagebox.showerror("Invalid Phone Number", error)
+                    return
+            
+            # Validate user name
+            user_name = self.entry_user_name.get().strip()
+            if user_name:
+                is_valid, error = validate_name(user_name)
+                if not is_valid:
+                    messagebox.showerror("Invalid Name", error)
+                    return
+            
+            # Validate recipient email
+            recipient_email = self.entry_email.get().strip()
+            if recipient_email:
+                is_valid, error = validate_email(recipient_email)
+                if not is_valid:
+                    messagebox.showerror("Invalid Recipient Email", error)
+                    return
+            
+            # Validate emergency contacts
+            # First, parse them from the listbox (because self.emergency_contacts doesn't exist)
+            emergency_contacts_parsed = []
+            for i in range(self.emergency_contacts_listbox.size()):
+                contact_display = self.emergency_contacts_listbox.get(i)
+                # Parse "Name - Phone" format
+                if " - " in contact_display:
+                    parts = contact_display.split(" - ", 1)
+                    name = parts[0]
+                    phone = parts[1]
+                    email = "" # TODO: Add email to listbox display if we want to validate it
+                    emergency_contacts_parsed.append({"name": name, "phone": phone, "email": email})
+                else:
+                    # Old format or just phone
+                    emergency_contacts_parsed.append({"name": "Unknown", "phone": contact_display, "email": ""})
+
+            # Now validate the parsed contacts
+            for contact in emergency_contacts_parsed:
+                # Validate contact email
+                if contact.get('email', '').strip():
+                    is_valid, error = validate_email(contact['email'])
+                    if not is_valid:
+                        messagebox.showerror("Invalid Contact Email", 
+                            f"Contact '{contact.get('name', 'Unknown')}' has invalid email:\n{error}")
+                        return
+                
+                # Validate contact phone
+                if contact.get('phone', '').strip():
+                    is_valid, error = validate_phone(contact['phone'])
+                    if not is_valid:
+                        messagebox.showerror("Invalid Contact Phone", 
+                            f"Contact '{contact.get('name', 'Unknown')}' has invalid phone:\n{error}")
+                        return
+                
+                # Validate contact name
+                if contact.get('name', '').strip():
+                    is_valid, error = validate_name(contact['name'])
+                    if not is_valid:
+                        messagebox.showerror("Invalid Contact Name", 
+                            f"Contact name is invalid:\n{error}")
+                        return
+            
             prefs = self.settings["user_preferences"]
             
             self.settings["user"]["recipient_email"] = self.entry_email.get()
@@ -851,18 +1108,16 @@ class SettingsFrame(tk.Frame):
                 # Clear the field after saving
                 self.entry_emergency_pin.delete(0, tk.END)
             
-            # Get emergency contacts from listbox (parse "Name - Phone" format)
-            emergency_contacts = []
-            for i in range(self.emergency_contacts_listbox.size()):
-                contact_display = self.emergency_contacts_listbox.get(i)
-                # Parse "Name - Phone" format
-                if " - " in contact_display:
-                    parts = contact_display.split(" - ", 1)
-                    emergency_contacts.append({"name": parts[0].strip(), "phone": parts[1].strip()})
-                else:
-                    # Just phone number (backward compatibility)
-                    emergency_contacts.append({"name": "", "phone": contact_display.strip()})
-            self.settings["emergency"]["emergency_contacts"] = emergency_contacts
+            # Use the already parsed (and validated) contacts list
+            # We strip the "email" field if it's empty to match previous structure, or keep it if backend supports it.
+            # For safety, let's keep it clean.
+            clean_contacts = []
+            for c in emergency_contacts_parsed:
+                contact = {"name": c["name"], "phone": c["phone"]}
+                if c["email"]: contact["email"] = c["email"]
+                clean_contacts.append(contact)
+            
+            self.settings["emergency"]["emergency_contacts"] = clean_contacts
             
             # Save data sharing preferences
             self.settings["emergency"]["data_sharing_preferences"] = {
@@ -875,6 +1130,22 @@ class SettingsFrame(tk.Frame):
                 'microphone': self.data_sharing_prefs['microphone'].get(),
                 'screen_record': self.data_sharing_prefs['screen_record'].get()
             }
+            
+            # Save emergency mode duration
+            try:
+                duration_value = int(self.emergency_duration_value.get())
+                if duration_value <= 0:
+                    raise ValueError("Emergency duration must be a positive number.")
+                duration_unit = self.emergency_duration_unit.get()
+                self.settings["emergency"]["max_duration_minutes"] = duration_value if duration_unit == "minutes" else duration_value * 60
+                self.settings["emergency"]["duration_unit"] = duration_unit
+            except ValueError as e:
+                messagebox.showerror("Invalid Duration", f"Emergency duration must be a positive number. Error: {e}")
+                return
+            
+            # Save email interval setting
+            email_interval = self.email_interval_var.get()
+            self.settings["emergency"]["email_interval_seconds"] = email_interval
             
             if not self.settings["user"]["device_name"]:
                 raise ValueError("Device Name cannot be empty.")

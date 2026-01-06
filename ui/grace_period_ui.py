@@ -83,6 +83,20 @@ class GracePeriodWindow(tk.Toplevel):
         
         # Start the countdown
         self.update_countdown()
+        
+        # Register for state changes to close if stopped elsewhere
+        from emergency_alert_manager import register_state_change_callback
+        register_state_change_callback(self.on_global_state_change)
+
+    def on_global_state_change(self):
+        """Called when emergency state changes globally"""
+        from emergency_alert_manager import is_emergency_active
+        try:
+            if not is_emergency_active() and self.alert_sent:
+                log.info("Emergency stopped elsewhere. Closing status window.")
+                self.after(0, self.destroy)
+        except Exception:
+            pass
 
     def update_countdown(self):
         if self.countdown > 0:
@@ -92,46 +106,66 @@ class GracePeriodWindow(tk.Toplevel):
         else:
             # Time's up! Send the alert.
             self.alert_sent = True  # Mark that alert has been sent
-            self.lbl_countdown.config(text="✓ SENT", foreground="#00FF00")  # Green color
-            self.lbl_info.config(text="✓ Alert sent successfully!\n\nEmergency mode is now ACTIVE.\nData is being collected and sent every 30 seconds.\n\nYou can stop emergency mode from the Dashboard.")
-            self.btn_cancel.config(state="disabled", text="✕ ALERT SENT - CANNOT CANCEL")
+            self.lbl_countdown.config(text="✓ ACTIVE", foreground="#00FF00")  # Green color
+            self.lbl_info.config(text="✓ EMERGENCY MODE IS NOW ACTIVE ✓\n\nData (Camera, Mic, Screen, Location) is being\ncaptured and sent every 30 seconds.")
+            
+            # Change button to "STOP EMERGENCY"
+            self.btn_cancel.config(
+                text="🛑 STOP EMERGENCY MODE 🛑",
+                command=self.handle_stop_emergency,
+                bg="#FF6B35", # Orange-red
+                activebackground="#E55A2B"
+            )
+            
+            # Call the send function
             self.on_confirm_callback() # Call the send function
             
-            # Allow window to be closed after alert is sent
-            self.attributes('-topmost', False)  # Allow window to go behind others
             
-            # Change cancel button to a "Close" button after a short delay
-            self.after(2000, self.show_close_button)
-    
-    def show_close_button(self):
-        """Change the cancel button to a close button after alert is sent"""
-        try:
-            if self.alert_sent:
-                # Alert was sent - change button to allow closing
-                self.btn_cancel.config(
-                    state="normal",
-                    text="✓ CLOSE WINDOW",
-                    command=self.close_window,
-                    bg="#4CAF50",  # Green
-                    activebackground="#45a049",
-                    fg="white"
-                )
-        except Exception as e:
-            log.error("Error updating grace period window")
-            log.debug(f"Grace period window error: {e}")
+    def handle_stop_emergency(self):
+        """Handle stop button click"""
+        from emergency_alert_manager import stop_emergency_with_pin
+        if stop_emergency_with_pin(self):
+            # If successfully stopped, window will close via on_global_state_change
+            # but we can call destroy() here too to be safe
+            self.destroy()
     
     def handle_window_close(self):
         """Handle window close attempt - allow closing after alert is sent"""
-        if self.alert_sent:
-            # Alert already sent, allow closing
-            self.destroy()
+        from emergency_alert_manager import is_emergency_active
+        if self.alert_sent or is_emergency_active():
+            # If alert sent, don't just close - must stop if active
+            from tkinter import messagebox
+            if is_emergency_active():
+                result = messagebox.askyesno(
+                    "Active Emergency",
+                    "Emergency Mode is currently ACTIVE. To close this window, you must first STOP emergency mode.\n\nDo you want to stop emergency mode now?",
+                    parent=self,
+                    icon="warning"
+                )
+                if result:
+                    self.handle_stop_emergency()
+                return
+            else:
+                self.destroy()
         else:
             # Alert not sent yet, cancel it
             self.on_cancel_callback()
     
     def close_window(self):
         """Close the grace period window"""
+        from emergency_alert_manager import unregister_state_change_callback
+        try:
+            unregister_state_change_callback(self.on_global_state_change)
+        except: pass
         self.destroy()
+
+    def destroy(self):
+        """Override destroy to unregister callback"""
+        from emergency_alert_manager import unregister_state_change_callback
+        try:
+            unregister_state_change_callback(self.on_global_state_change)
+        except: pass
+        super().destroy()
 
     def toggle_maximize(self):
         """Toggle between normal and maximized window states."""

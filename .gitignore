@@ -23,3 +23,26 @@ settings.json
 node_modules/
 npm-debug.log
 yarn-error.logn
+# Video files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wmv
+
+# Audio files
+*.mp3
+*.wav
+*.aiff
+*.ogg
+*.flac
+
+# Build Artifacts (PyInstaller)
+build/
+dist/
+*.spec
+
+# App Data Staging
+app_data/
+outbox/
+instant_outbox/

@@ -2,7 +2,39 @@ import json
 import os
 from logger_setup import log
 
-CONFIG_FILE = 'settings.json'
+# --- Centralized Data Directory ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "app_data")
+
+# Create data directory if it doesn't exist
+if not os.path.exists(DATA_DIR):
+    try:
+        os.makedirs(DATA_DIR)
+        # Verify it was created
+        if not os.path.exists(DATA_DIR):
+            raise OSError("Directory not created")
+            
+        # Hide the folder on Windows (Security requirement)
+        if os.name == 'nt':
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(DATA_DIR, 2) # 2 = Hidden
+    except Exception as e:
+        print(f"CRITICAL: Failed to create data directory {DATA_DIR}: {e}")
+        # Fallback to current directory
+        DATA_DIR = BASE_DIR
+
+CONFIG_FILE = os.path.join(DATA_DIR, 'settings.json')
+
+# Migration: Move old settings.json if it exists
+try:
+    OLD_CONFIG_FILE = os.path.join(BASE_DIR, 'settings.json')
+    if os.path.exists(OLD_CONFIG_FILE) and not os.path.exists(CONFIG_FILE):
+        import shutil
+        shutil.move(OLD_CONFIG_FILE, CONFIG_FILE)
+        from logger_setup import log
+        log.info(f"Migrated settings.json to {DATA_DIR}")
+except Exception as e:
+    print(f"Migration Warning: {e}")
 
 CURRENT_APP_VERSION = "1.0.0"
 VERSION_CHECK_URL = "https://gist.githubusercontent.com/YOUR_USERNAME/YOUR_GIST_ID/raw/version.json"
@@ -10,21 +42,71 @@ VERSION_CHECK_URL = "https://gist.githubusercontent.com/YOUR_USERNAME/YOUR_GIST_
 class ConfigManager:
     def __init__(self, file_path=CONFIG_FILE):
         self.file_path = file_path
+        self.current_user_id = None  # Track which user's settings are loaded
         self.settings = self.load_settings()
 
     def load_settings(self):
+        """Load settings from local file (used as cache/offline mode)"""
         defaults = self._get_default_settings()
         if os.path.exists(self.file_path):
             try:
                 with open(self.file_path, 'r') as f:
                     settings = json.load(f)
                     self._merge_settings(defaults, settings)
+                    # Track which user these settings belong to
+                    self.current_user_id = settings.get("_user_id", None)
                     return defaults
             except json.JSONDecodeError:
                 log.error("Error reading settings.json, creating a new one.")
                 return defaults
         else:
             return defaults
+    
+    def load_user_settings_from_db(self, user_id, supabase_client):
+        """Load user-specific settings from database"""
+        try:
+            result = supabase_client.table("user_settings").select("settings").eq("user_id", user_id).execute()
+            
+            if result.data and len(result.data) > 0:
+                # User has settings in database - load them
+                user_settings = result.data[0]["settings"]
+                log.info(f"Loaded settings from database for user {user_id}")
+                
+                # Merge with defaults to ensure all keys exist
+                defaults = self._get_default_settings()
+                self._merge_settings(defaults, user_settings)
+                defaults["_user_id"] = user_id  # Track user
+                
+                self.settings = defaults
+                self.current_user_id = user_id
+                self.save_settings()  # Cache locally
+                return True
+            else:
+                # First time - save CURRENT settings to database (not defaults)
+                log.info(f"First login - saving current settings to database for user {user_id}")
+                
+                # Use current settings (preserves any settings user already configured)
+                current_settings = self.settings.copy()
+                current_settings["_user_id"] = user_id
+                
+                # Remove _user_id before saving to database
+                settings_to_save = {k: v for k, v in current_settings.items() if k != "_user_id"}
+                
+                supabase_client.table("user_settings").insert({
+                    "user_id": user_id,
+                    "settings": settings_to_save
+                }).execute()
+                
+                self.settings = current_settings
+                self.current_user_id = user_id
+                self.save_settings()  # Cache locally
+                log.info("Current settings saved to database successfully")
+                return True
+                
+        except Exception as e:
+            log.error(f"Error loading user settings from database: {e}")
+            log.warning("Using local settings as fallback")
+            return False
 
     def _merge_settings(self, defaults, loaded):
         for key, value in loaded.items():
@@ -35,6 +117,7 @@ class ConfigManager:
     
     def _get_default_settings(self):
         return {
+            "_user_id": None,  # Track which user these settings belong to
             "user": {
                 "recipient_email": "",
                 "encryption_password": "",
@@ -52,7 +135,7 @@ class ConfigManager:
                 "has_consented": False
             },
             "admin": {
-                "admin_support_email": "frdsconnect7799@gmail.com",
+                "admin_support_email": "ecando976@gmail.com",
                 "log_send_interval_hours": 24
             },
             "emergency": {
@@ -73,7 +156,10 @@ class ConfigManager:
                     "camera": False,
                     "microphone": False,
                     "screen_record": False
-                }
+                },
+                "max_duration_minutes": 59,
+                "duration_unit": "minutes",
+                "email_interval_seconds": 30
             },
             "reporting": {
                 "bundle_interval": 60,
@@ -150,17 +236,38 @@ class ConfigManager:
         }
 
     def save_settings(self):
+        """Save settings locally (cache) and to database if user is logged in"""
+        # Save locally
         try:
             with open(self.file_path, 'w') as f:
                 json.dump(self.settings, f, indent=4)
-            log.info("Settings saved.")
+            log.info("Settings saved locally.")
         except Exception as e:
-            log.error(f"Error saving settings: {e}")
+            log.error(f"Error saving settings locally: {e}")
+        
+        # Save to database if user is logged in
+        if self.current_user_id:
+            try:
+                from auth import auth_service
+                if auth_service and auth_service.client:
+                    # Remove _user_id before saving to database
+                    settings_to_save = {k: v for k, v in self.settings.items() if k != "_user_id"}
+                    
+                    auth_service.client.table("user_settings").update({
+                        "settings": settings_to_save,
+                        "updated_at": "now()"
+                    }).eq("user_id", self.current_user_id).execute()
+                    log.info("Settings synced to database.")
+            except Exception as e:
+                log.warning(f"Could not sync settings to database: {e}")
 
     def get_settings(self):
         return self.settings
 
     def update_settings(self, new_settings_dict):
+        # Preserve user_id
+        if "_user_id" in self.settings:
+            new_settings_dict["_user_id"] = self.settings["_user_id"]
         self.settings = new_settings_dict
         self.save_settings()
 

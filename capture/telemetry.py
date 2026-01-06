@@ -6,13 +6,13 @@ import platform
 import socket
 import GPUtil
 import requests
-from config import config_manager
+from config import config_manager, DATA_DIR
 from logger_setup import log
 from datetime import datetime
 import asyncio
 import winsdk.windows.devices.geolocation as wdg
 
-OUTPUT_DIR = "captures"
+OUTPUT_DIR = os.path.join(DATA_DIR, "captures")
 
 def get_device_name_and_time():
     try:
@@ -108,7 +108,7 @@ async def _get_precise_coords_async(timeout_seconds=10):
     try:
         locator = wdg.Geolocator()
         # Request high accuracy
-        locator.desired_accuracy = wdg.PositionAccuracy.high
+        locator.desired_accuracy = wdg.PositionAccuracy.HIGH
         
         # Get position with timeout
         pos = await asyncio.wait_for(

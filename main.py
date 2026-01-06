@@ -8,6 +8,8 @@ import cv2
 from ui.main_window import MainWindow
 from logger_setup import log
 
+
+
 # --- System Tray Icon ---
 icon_image = None
 tray_icon = None  # Global reference to tray icon
@@ -81,15 +83,79 @@ def on_close_to_tray():
 
 # --- Main Application ---
 if __name__ == "__main__":
-    # Application starting log removed per user request
-    
-    start_in_emergency_mode = False
-    start_minimized = False
-    
-    if "--emergency" in sys.argv:
-        log.warning("EMERGENCY SHORTCUT ACTIVATED!")
-        start_in_emergency_mode = True
-    
+    try:
+        # --- Create PID Lock File ---
+        try:
+            from config import DATA_DIR
+            import atexit
+            
+            pid_file = os.path.join(DATA_DIR, "app.lock")
+            with open(pid_file, 'w') as f:
+                f.write(str(os.getpid()))
+                
+            def cleanup_pid():
+                try:
+                    if os.path.exists(pid_file):
+                        os.remove(pid_file)
+                except: pass
+            atexit.register(cleanup_pid)
+        except Exception as e:
+            log.warning(f"Failed to create PID lock file: {e}")
+        # ----------------------------
+        
+        start_in_emergency_mode = False
+        start_minimized = False
+        
+        if "--emergency" in sys.argv:
+            log.warning("EMERGENCY SHORTCUT ACTIVATED!")
+            start_in_emergency_mode = True
+        
+        if "--minimized" in sys.argv:
+            log.info("Starting in minimized mode (auto-start on boot)")
+            start_minimized = True
+
+        main_app = MainWindow(start_in_emergency_mode=start_in_emergency_mode)
+        
+        # Configure window to hide from taskbar when minimized
+        if sys.platform == "win32":
+            try:
+                # --- Fix Taskbar Icon ---
+                import ctypes
+                myappid = 'ecantech.emonitor.app.1.0' # Arbitrary string
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                # ------------------------
+                
+                # Hide from taskbar when minimized (Windows-specific)
+                main_app.attributes('-toolwindow', False)  # Keep as normal window
+                # Use withdraw/iconify to hide from taskbar properly
+            except Exception as e:
+                log.warning(f"Could not set window attributes: {e}")
+        
+        # When you click the "X" button, it now minimizes to tray
+        main_app.protocol("WM_DELETE_WINDOW", on_close_to_tray)
+        
+        # If starting minimized (auto-start), hide window and show tray immediately
+        if start_minimized:
+            log.info("Hiding window and starting tray icon for auto-start mode")
+            main_app.withdraw()  # Hide window completely
+            # Start tray icon immediately
+            if not any(t.name == "pystray_thread" for t in threading.enumerate()):
+                tray_thread = threading.Thread(target=setup_tray_icon, daemon=True, name="pystray_thread")
+                tray_thread.start()
+        
+        main_app.mainloop()
+        
+        log.info("Mainloop finished. Running final cleanup.")
+        cv2.destroyAllWindows()
+        
+    except Exception as e:
+        import traceback
+        err_msg = f"CRITICAL CRASH:\n{traceback.format_exc()}"
+        print(err_msg, file=sys.stderr)
+        with open("crash_error.txt", "w") as f:
+            f.write(err_msg)
+        input("App Crashed. Press Enter to exit...")
+    log.info("Application shut down.")
     if "--minimized" in sys.argv:
         log.info("Starting in minimized mode (auto-start on boot)")
         start_minimized = True
@@ -99,6 +165,12 @@ if __name__ == "__main__":
     # Configure window to hide from taskbar when minimized
     if sys.platform == "win32":
         try:
+            # --- Fix Taskbar Icon ---
+            import ctypes
+            myappid = 'ecantech.emonitor.app.1.0' # Arbitrary string
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            # ------------------------
+            
             # Hide from taskbar when minimized (Windows-specific)
             main_app.attributes('-toolwindow', False)  # Keep as normal window
             # Use withdraw/iconify to hide from taskbar properly

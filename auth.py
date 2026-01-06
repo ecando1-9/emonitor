@@ -39,8 +39,7 @@ class AuthService:
             
             log.info("Device hash generated. Attempting to create user...")
             
-            # We just sign up the user and pass the device_hash in the metadata
-            # The trigger (handle_new_user_setup) will see this and run.
+            # Step 1: Sign up the user in Supabase Auth
             res = self.client.auth.sign_up({
                 "email": email,
                 "password": password,
@@ -52,47 +51,259 @@ class AuthService:
             })
             
             if res.user:
-                log.info(f"Sign up successful for {email}. Trigger will handle setup.")
-                # We must wait a moment for the trigger to run *before* we sign in
-                time.sleep(1.5) # Wait 1.5 seconds for the database trigger
-                return self.sign_in(email, password) 
+                log.info(f"Auth signup successful for {email}. Creating user record...")
+                
+                # Step 2: Create user record in public.users table
+                try:
+                    user_data = {
+                        "id": res.user.id,
+                        "email": email,
+                        "device_hash": device_hash,
+                        "created_at": "now()",
+                        "updated_at": "now()"
+                    }
+                    
+                    # Insert user record
+                    insert_result = self.client.table("users").insert(user_data).execute()
+                    log.info(f"User record created successfully in public.users table")
+                    
+                except Exception as db_error:
+                    log.error(f"Failed to create user record: {db_error}")
+                    log.warning("Continuing with login despite user record creation failure")
+                
+                # Step 3: Check app config for auto-trial creation
+                try:
+                    # Fetch app config settings
+                    auto_trial_config = self.client.table("app_config").select("value").eq("key", "auto_create_trial").execute()
+                    trial_days_config = self.client.table("app_config").select("value").eq("key", "free_trial_days").execute()
+                    
+                    # Check if auto-trial is enabled
+                    auto_create = True  # Default
+                    if auto_trial_config.data and len(auto_trial_config.data) > 0:
+                        value = auto_trial_config.data[0].get("value", "true").lower()
+                        auto_create = value in ["true", "1", "yes", "enabled"]
+                    
+                    # Get trial days
+                    trial_days = 7  # Default
+                    if trial_days_config.data and len(trial_days_config.data) > 0:
+                        try:
+                            trial_days = int(trial_days_config.data[0].get("value", "7"))
+                        except:
+                            trial_days = 7
+                    
+                    log.info(f"App config: auto_create_trial={auto_create}, trial_days={trial_days}")
+                    
+                    # Create trial if enabled
+                    if auto_create:
+                        from datetime import datetime, timedelta
+                        
+                        trial_end = datetime.now() + timedelta(days=trial_days)
+                        
+                        subscription_data = {
+                            "user_id": res.user.id,
+                            "plan_id": "free",
+                            "status": "trialing",
+                            "trial_ends_at": trial_end.isoformat(),
+                            "device_hash": device_hash,
+                            "created_at": "now()",
+                            "updated_at": "now()"
+                        }
+                        
+                        sub_result = self.client.table("subscriptions").insert(subscription_data).execute()
+                        log.info(f"✅ Free trial created: {trial_days} days (ends {trial_end.strftime('%Y-%m-%d')})")
+                    else:
+                        log.info("Auto-trial disabled by admin. User will need manual subscription assignment.")
+                        
+                except Exception as settings_error:
+                    log.warning(f"Could not read app config or create trial: {settings_error}")
+                    log.info("User can still login. Subscription can be assigned via admin panel.")
+                
+                # Step 4: Sign in to get session
+                return self.sign_in(email, password)
+                
             if res.api_error:
                 log.error(f"Sign up failed: {res.api_error.message}")
                 return {"success": False, "error": res.api_error.message}
                 
         except Exception as e:
             log.error(f"Sign up exception: {e}")
+            log.error(f"Exception type: {type(e).__name__}")
+            log.error(f"Exception details: {str(e)}")
+            import traceback
+            log.error(f"Traceback: {traceback.format_exc()}")
             if "Trial limit reached" in str(e):
                 return {"success": False, "error": "Trial limit reached for this device (maximum 5 trials). Contact support."}
             if "CRITICAL" in str(e):
                 return {"success": False, "error": "No available sender emails in the pool. Please contact support."}
-            return {"success": False, "error": "An unknown error occurred during signup."}
+            return {"success": False, "error": f"Signup error: {str(e)}"}
 
     def sign_in(self, email, password):
         """Signs in and fetches the user's subscription status."""
         try:
+            from datetime import datetime, timedelta
+            from device_fingerprint import get_device_hash
+            
+            # Check login attempts before trying to sign in
+            device_hash = get_device_hash()
+            ten_min_ago = (datetime.now() - timedelta(minutes=10)).isoformat()
+            
+            try:
+                # Use RPC to check if blocked (bypass RLS read restrictions)
+                result = self.client.rpc("check_is_blocked", {"p_email": email}).execute()
+                
+                is_blocked = result.data
+                
+                if is_blocked:
+                    log.warning(f"Login blocked for {email}: Too many failed attempts")
+                    return {
+                        "success": False, 
+                        "error": "Too many failed login attempts. Please wait 10 minutes and try again."
+                    }
+            except Exception as e:
+                log.warning(f"Could not check login attempts RPC: {e}")
+                # Continue even if check fails
+            
+            # Attempt login
             res = self.client.auth.sign_in_with_password({"email": email, "password": password})
+            
             if res.user:
+                # Record successful login
+                # Record successful login
+                try:
+                    self.client.rpc("record_login_attempt", {
+                        "p_email": email,
+                        "p_device_hash": device_hash,
+                        "p_success": True
+                    }).execute()
+                except Exception as ex:
+                    log.warning(f"Failed to record successful login via RPC: {ex}")
+                
+                
                 self.current_user = res.user
                 self.session = res.session
                 log.info(f"Sign in successful for {res.user.email}")
                 
                 self.save_full_login_session(res.session.refresh_token)
                 
+                # Track active device for single device login
+                from device_fingerprint import get_device_hash
+                current_device = get_device_hash()
+                
+                try:
+                    # Check if user is logged in on different device
+                    user_record = self.client.table("users").select("active_device_hash, email").eq("id", res.user.id).execute()
+                    
+                    if user_record.data and len(user_record.data) > 0:
+                        old_device = user_record.data[0].get("active_device_hash")
+                        
+                        if old_device and old_device != current_device:
+                            log.info(f"User {res.user.email} logging in from new device. Previous device will be logged out.")
+                            log.info(f"Old device: {old_device[:8]}..., New device: {current_device[:8]}...")
+                    
+                    # Update active device and session
+                    self.client.table("users").update({
+                        "active_device_hash": current_device,
+                        "active_session_id": res.session.access_token,
+                        "last_active": "now()",
+                        "last_login": "now()"
+                    }).eq("id", res.user.id).execute()
+                    
+                    log.info(f"Active device updated for user {res.user.email}")
+                    
+                    # --- NEW: Update Devices Table for Admin Monitoring ---
+                    try:
+                        # Register/Update device in devices table
+                        # This enables "Multi-Device Monitoring" in admin panel
+                        self.client.table("devices").upsert({
+                            "device_hash": current_device,
+                            "last_user_id": res.user.id,
+                            "last_seen": "now()",
+                            "is_blocked": False
+                        }, on_conflict="device_hash").execute()
+                    except Exception as dev_e:
+                        log.warning(f"Could not update devices table: {dev_e}")
+                    # ------------------------------------------------------
+                    
+                except Exception as e:
+                    log.warning(f"Could not update active device: {e}")
+                    # Continue with login even if device tracking fails
+                
+                # Load user-specific settings from database
+                from config import config_manager
+                config_manager.load_user_settings_from_db(res.user.id, self.client)
+                log.info("User-specific settings loaded")
+                
                 # --- !! NEW: FETCH SUBSCRIPTION !! ---
                 sub_data = self.get_subscription_status()
-                # This check fixes the 'NoneType' crash
+                # For new users, subscription may not exist yet - that's okay
                 if sub_data is None:
-                    return {"success": False, "error": "Failed to fetch subscription. User record may be incomplete."}
+                    log.warning("No subscription found for user. Using default/trial features.")
+                    sub_data = {"status": "new_user", "plan_id": None}
                 
                 return {"success": True, "user": res.user, "subscription": sub_data}
                 
             if res.api_error:
+                # Record failed login attempt
+                from datetime import datetime
+                from device_fingerprint import get_device_hash
+                try:
+                    device_hash = get_device_hash()
+                    # Use RPC to bypass RLS issues
+                    self.client.rpc("record_login_attempt", {
+                        "p_email": email,
+                        "p_device_hash": device_hash,
+                        "p_success": False
+                    }).execute()
+                except Exception as ex:
+                    log.warning(f"Failed to record login attempt via RPC: {ex}")
+                
                 log.error(f"Sign in failed: {res.api_error.message}")
                 return {"success": False, "error": res.api_error.message}
         except Exception as e:
+            # Record failed login attempt for exceptions too
+            from datetime import datetime
+            from device_fingerprint import get_device_hash
+            try:
+                device_hash = get_device_hash()
+                # Use RPC to bypass RLS issues
+                self.client.rpc("record_login_attempt", {
+                    "p_email": email,
+                    "p_device_hash": device_hash,
+                    "p_success": False
+                }).execute()
+            except Exception as ex:
+                log.warning(f"Failed to record login attempt via RPC: {ex}")
+            
             log.error(f"Sign in exception: {e}")
             return {"success": False, "error": str(e)}
+    
+    def check_active_device(self):
+        """
+        Check if current device is still the active device for this user.
+        Returns True if active, False if user logged in on another device.
+        """
+        if not self.current_user:
+            return True  # No user logged in, nothing to check
+        
+        try:
+            from device_fingerprint import get_device_hash
+            current_device = get_device_hash()
+            
+            # Get active device from database
+            user_record = self.client.table("users").select("active_device_hash").eq("id", self.current_user.id).execute()
+            
+            if user_record.data and len(user_record.data) > 0:
+                active_device = user_record.data[0].get("active_device_hash")
+                
+                if active_device and active_device != current_device:
+                    log.warning(f"User {self.current_user.email} is active on different device. Current: {current_device[:8]}..., Active: {active_device[:8]}...")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            log.error(f"Error checking active device: {e}")
+            return True  # On error, don't force logout
 
     def check_password(self, password_to_check):
         if not self.current_user:
@@ -222,6 +433,8 @@ class AuthService:
 
     def send_password_reset_email(self, email):
         try:
+            # Reverting to simple call first as 'redirect_to' kwarg failed
+            # If the link is still empty, we will try passing options dict next
             self.client.auth.reset_password_for_email(email)
             log.info(f"Password reset email sent to {email}")
             return {"success": True}
@@ -246,6 +459,26 @@ class AuthService:
         Uses caching to avoid repeated database queries and log spam.
         """
         if not self.current_user:
+            # Try to use emergency fallback RPC (allows sending alerts even if logged out)
+            try:
+                log.info("User not logged in - attempting to fetch emergency sender via secure RPC...")
+                rpc_response = self.client.rpc("get_emergency_sender_secure").execute()
+                if rpc_response.data:
+                    data = rpc_response.data
+                    result = {
+                        "success": True,
+                        "data": {
+                            "smtp_server": data.get("smtp_server"),
+                            "smtp_port": int(data.get("smtp_port", 587)),
+                            "smtp_email": data.get("smtp_email"),
+                            "smtp_password": data.get("smtp_password"),
+                        }
+                    }
+                    log.info(f"✅ Retrieved emergency sender via RPC: {data.get('smtp_email')}")
+                    return result
+            except Exception as rpc_error:
+                log.warning(f"Failed to get emergency sender via RPC: {rpc_error}")
+            
             return {"success": False, "error": "User not logged in"}
 
         # Check cache first (if enabled and not expired)
@@ -353,11 +586,10 @@ class AuthService:
                     # Increment assigned_count in database (optional - can be done asynchronously)
                     try:
                         if sender_id:
-                            new_count = (row.get("assigned_count", 0) or 0) + 1
-                            self.client.from_("sender_pool").update({
-                                "assigned_count": new_count
-                            }).eq("id", sender_id).execute()
-                            log.debug(f"Updated assigned_count for sender {sender_id} to {new_count}")
+                            self.client.rpc("increment_sender_assigned_count", {
+                                "sender_id_to_inc": sender_id
+                            }).execute()
+                            log.debug(f"Incremented assigned_count for sender {sender_id} via RPC")
                     except Exception as update_error:
                         if should_log_warning:
                             log.warning(f"Failed to update assigned_count: {update_error}")

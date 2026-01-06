@@ -1,10 +1,10 @@
 import mss
 import time
 import os
-from config import config_manager
+from config import config_manager, DATA_DIR
 from logger_setup import log
 
-OUTPUT_DIR = "captures"
+OUTPUT_DIR = os.path.join(DATA_DIR, "captures")
 
 def get_device_name_and_time():
     try:

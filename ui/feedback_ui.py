@@ -34,6 +34,11 @@ class FeedbackWindow(tk.Toplevel):
         self.text_area.pack(pady=10, padx=20, fill="both", expand=True)
         self.text_area.insert(tk.INSERT, "Please describe the problem or your feedback here...")
         
+        # Checkbox for log attachment
+        self.log_var = tk.BooleanVar(value=True)
+        self.chk_log = ttk.Checkbutton(self, text="Attach application log (recommended for debugging)", variable=self.log_var)
+        self.chk_log.pack(pady=(0, 5))
+        
         # Button Frame
         btn_frame = ttk.Frame(self)
         btn_frame.pack(pady=10)
@@ -50,10 +55,11 @@ class FeedbackWindow(tk.Toplevel):
         self.btn_cancel.config(state="disabled")
         
         message = self.text_area.get("1.0", tk.END)
+        include_log = self.log_var.get()
         
-        threading.Thread(target=self.send_feedback, args=(message,), daemon=True).start()
+        threading.Thread(target=self.send_feedback, args=(message, include_log), daemon=True).start()
 
-    def send_feedback(self, message):
+    def send_feedback(self, message, include_log):
         """The actual sending logic"""
         try:
             admin_email = self.controller.config.get_settings()["admin"]["admin_support_email"]
@@ -68,7 +74,52 @@ class FeedbackWindow(tk.Toplevel):
                 return
             
             user_email = self.controller.auth.current_user.email
+            user_id = self.controller.auth.current_user.id
             
+            # --- 1. Save to Supabase ---
+            try:
+                import platform
+                import json
+                
+                device_info = {
+                    "node": platform.node(),
+                    "system": platform.system(),
+                    "release": platform.release(),
+                    "version": platform.version(),
+                    "machine": platform.machine(),
+                    "processor": platform.processor()
+                }
+                
+                # Determine feedback type (simple heuristic)
+                feedback_type = "feedback"
+                subject_lower = message.lower().split("\n")[0][:50]
+                if "bug" in subject_lower or "error" in subject_lower or "crash" in subject_lower:
+                    feedback_type = "bug"
+                elif "feature" in subject_lower or "request" in subject_lower:
+                    feedback_type = "feature_request"
+                elif "issue" in subject_lower or "help" in subject_lower:
+                    feedback_type = "issue"
+                
+                # Call RPC function
+                from auth import auth_service
+                
+                rpc_params = {
+                    "p_user_email": user_email,
+                    "p_user_name": str(self.controller.auth.current_user.user_metadata.get("full_name", "User")),
+                    "p_feedback_type": feedback_type,
+                    "p_subject": message.split("\n")[0][:100] if message else "No Subject",
+                    "p_message": message,
+                    "p_device_info": device_info,
+                    "p_app_version": "1.0.0" # You might want to get this dynamically
+                }
+                
+                response = auth_service.client.rpc("submit_user_feedback", rpc_params).execute()
+                log.info(f"Feedback saved to Supabase: {response.data}")
+                
+            except Exception as db_err:
+                log.error(f"Failed to save feedback to database (continuing to email): {db_err}")
+
+            # --- 2. Send Email ---
             creds_result = self.controller.auth.get_sender_assignment()
             if not creds_result.get("success"):
                 log.error("Feedback failed: Could not get sender credentials.")
@@ -76,12 +127,12 @@ class FeedbackWindow(tk.Toplevel):
                 return
 
             sender_config = creds_result.get("data")
-            log_path = "emoniter.log"
+            log_path = "emoniter.log" if include_log else None
             
             success = send_feedback_email(sender_config, admin_email, user_email, message, log_path)
             
             if success:
-                log.info("Feedback sent successfully.")
+                log.info(f"Successfully sent feedback to {admin_email}")
                 self.after(0, self.show_success_and_close)
             else:
                 log.error("Feedback send failed.")
@@ -95,7 +146,7 @@ class FeedbackWindow(tk.Toplevel):
             self.after(100, self.close_window) 
 
     def show_success_and_close(self):
-        messagebox.showinfo("Feedback Sent", "Thank you! Your feedback and log file have been sent to the admin.")
+        messagebox.showinfo("Feedback Sent", "Thank you! Your feedback has been saved and sent to our team.")
         self.destroy()
 
     def close_window(self):

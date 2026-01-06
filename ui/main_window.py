@@ -39,6 +39,23 @@ class MainWindow(tk.Tk):
         self.title("eMonitor")
         self.geometry("750x600")
         
+        # --- Set Window Icon ---
+        try:
+            if hasattr(sys, '_MEIPASS'):
+                base_path = sys._MEIPASS
+            else:
+                base_path = os.path.abspath(".")
+            icon_path = os.path.join(base_path, "icon.png")
+            
+            if os.path.exists(icon_path):
+                icon_img = tk.PhotoImage(file=icon_path)
+                self.iconphoto(True, icon_img)
+            else:
+                log.warning(f"Window icon not found: {icon_path}")
+        except Exception as e:
+            log.warning(f"Failed to set window icon: {e}")
+        # -----------------------
+        
         # Configure window to properly hide from taskbar when minimized (Windows)
         if sys.platform == "win32":
             try:
@@ -74,6 +91,48 @@ class MainWindow(tk.Tk):
             frame.grid(row=0, column=0, sticky="nsew")
             
         self.attempt_auto_login()
+        
+        # Start signal checker
+        self.check_external_signals()
+
+    def check_external_signals(self):
+        try:
+            from config import DATA_DIR
+            signal_file = os.path.join(DATA_DIR, "TRIGGER_EMERGENCY")
+            if os.path.exists(signal_file):
+                 try:
+                     os.remove(signal_file)
+                     log.warning("External Emergency Signal Detected!")
+                     from alert_manager import trigger_alert_process
+                     # Use 'after' to ensure it runs on Main Thread (UI operation)
+                     self.after(0, lambda: trigger_alert_process(self))
+                 except Exception as e:
+                     log.error(f"Error handling external signal: {e}")
+        except Exception:
+            pass
+        
+        # Check if this device is still the active device
+        try:
+            if self.auth.current_user:
+                is_active = self.auth.check_active_device()
+                if not is_active:
+                    log.warning("This device is no longer active - user logged in elsewhere")
+                    self.after(0, self.handle_device_logout)
+                    return  # Don't schedule next check
+        except Exception as e:
+            log.error(f"Error checking active device: {e}")
+        
+        self.after(2000, self.check_external_signals) # Check every 2 seconds
+    
+    def handle_device_logout(self):
+        """Handle logout when user logged in on another device"""
+        from tkinter import messagebox
+        messagebox.showinfo(
+            "Session Ended",
+            "Your account is now active on another device.\n\nYou have been logged out from this device."
+        )
+        self.auth.sign_out()
+        self.show_frame(LoginFrame)
 
     def attempt_auto_login(self):
         """

@@ -33,11 +33,11 @@ class DashboardFrame(tk.Frame):
         )
         self.lbl_emergency_status.pack(anchor="w", padx=10, pady=(5, 0))
         
-        # Emergency Button - Enhanced styling for better visibility
+        # Emergency Button - Single button that toggles between Turn On and Turn Off
         self.btn_emergency = tk.Button(
             emergency_frame, 
             text="🚨 TURN ON EMERGENCY 🚨",
-            command=self.handle_emergency_press,
+            command=self.handle_emergency_toggle,
             font=("Arial", 20, "bold"),
             bg="#DC143C",  # Crimson red
             fg="white",
@@ -54,33 +54,10 @@ class DashboardFrame(tk.Frame):
         )
         self.btn_emergency.pack(fill="x", padx=5, pady=5)
         
-        # Cancel Emergency Button (shown when emergency is active) - Make it more prominent
-        self.btn_cancel_emergency = tk.Button(
-            emergency_frame,
-            text="🛑 TURN OFF EMERGENCY MODE 🛑",
-            command=self.handle_cancel_emergency,
-            font=("Arial", 18, "bold"),
-            bg="#FF6B35",  # Orange-red for cancel
-            fg="white",
-            activebackground="#E55A2B",
-            activeforeground="white",
-            relief="raised",
-            bd=4,
-            padx=40,
-            pady=18,
-            cursor="hand2",
-            highlightthickness=3,
-            highlightbackground="#FFD700",
-            highlightcolor="#FFD700"
-        )
-        # Initially hidden, shown when emergency is active
-        self.btn_cancel_emergency.pack(fill="x", padx=5, pady=8)
-        self.btn_cancel_emergency.pack_forget()  # Hide initially
-        
         # Add help text below emergency button (in a separate row)
         self.help_text = ttk.Label(
             self, 
-            text="Press button above or use Ctrl+Alt+E • Desktop shortcut requires 4-digit PIN (set in Settings) • Click Settings to configure emergency email and PIN",
+            text="Press button above or use Ctrl+Alt+E • Click Settings to configure emergency email and PIN",
             font=("Arial", 9),
             foreground="gray",
             wraplength=600
@@ -122,6 +99,9 @@ class DashboardFrame(tk.Frame):
         btn_viewer = ttk.Button(nav_frame, text="View Decrypted Data", command=self.go_to_viewer)
         btn_viewer.pack(pady=5)
         
+        btn_pending = ttk.Button(nav_frame, text="View Pending Uploads", command=self.show_pending_uploads)
+        btn_pending.pack(pady=5)
+        
         btn_settings = ttk.Button(nav_frame, text="Settings", command=self.go_to_settings)
         btn_settings.pack(pady=5)
         
@@ -139,6 +119,10 @@ class DashboardFrame(tk.Frame):
         from .data_viewer_ui import DataViewerFrame
         self.controller.show_frame(DataViewerFrame)
 
+    def show_pending_uploads(self):
+        from .pending_uploads_ui import PendingUploadsWindow
+        PendingUploadsWindow(self)
+
     def go_to_settings(self):
         from .settings_ui import SettingsFrame
         self.controller.show_frame(SettingsFrame)
@@ -148,112 +132,83 @@ class DashboardFrame(tk.Frame):
         from .plans_ui import PlansFrame
         self.controller.show_frame(PlansFrame)
 
-    def handle_emergency_press(self):
-        """Handle emergency button press"""
-        from emergency_alert_manager import is_emergency_active, stop_emergency_mode
+    def handle_emergency_toggle(self):
+        """Handle emergency button press - toggles between Turn On and Turn Off"""
+        from emergency_alert_manager import is_emergency_active, stop_emergency_with_pin
         
         # Check if emergency is already active
         if is_emergency_active():
-            # Emergency is active - cancel button should be visible, but handle click anyway
-            self.handle_cancel_emergency()
-            return
-        
-        settings = self.controller.config.get_settings()
-        emergency_settings = settings.get("emergency", {})
-        
-        if not emergency_settings.get("enabled", False):
-            messagebox.showwarning("Emergency Alert Disabled", 
-                                  "Emergency Alert feature is disabled. Please enable it in Settings.")
-            return
-        
-        if not emergency_settings.get("data_sharing_consent", False):
-            messagebox.showwarning("Consent Required", 
-                                  "You must consent to data sharing in Emergency Alert settings before using this feature.")
-            return
-        
-        trigger_alert_process(self.controller)
-        # Immediately update button state to show emergency is ON
-        self.after(100, self.update_emergency_button_state)
-    
-    def handle_cancel_emergency(self):
-        """Handle cancel emergency button press"""
-        from emergency_alert_manager import is_emergency_active, stop_emergency_mode
-        from persistence import verify_pin
-        from config import config_manager
-        from tkinter import simpledialog
-
-        if is_emergency_active():
-            # Require PIN if configured, otherwise confirm
-            settings = config_manager.get_settings()
-            emergency_cfg = settings.get('emergency', {})
-            salt = emergency_cfg.get('emergency_shortcut_pin_salt')
-            hashed = emergency_cfg.get('emergency_shortcut_pin_hash')
-
-            if salt and hashed:
-                pin = simpledialog.askstring("Confirm PIN", "Enter Emergency PIN to stop emergency:", show='*', parent=self)
-                if not pin:
-                    messagebox.showinfo("Cancelled", "Emergency stop cancelled.", parent=self)
-                    return
-                if not (pin.isdigit() and len(pin) == 4):
-                    messagebox.showerror("Invalid PIN", "PIN must be exactly 4 digits.", parent=self)
-                    return
-                if not verify_pin(pin, salt, hashed):
-                    messagebox.showerror("Incorrect PIN", "The PIN entered is incorrect.", parent=self)
-                    return
-                # PIN verified - proceed
-            else:
-                result = messagebox.askyesno(
-                    "Stop Emergency Mode?",
-                    "No Emergency PIN is configured. Are you sure you want to stop emergency mode?",
-                    icon="warning"
-                )
-                if not result:
-                    return
-
-            stop_emergency_mode()
-            # Update button state immediately to show OFF status
-            self.update_emergency_button_state()
-            # Show info dialog with emphasized message
-            messagebox.showinfo(
-                "✓ Emergency Stopped", 
-                "Emergency mode has been STOPPED successfully.\n\n"
-                "• All data collection has stopped\n"
-                "• Final data has been sent to emergency contacts\n"
-                "• System is back to normal monitoring"
-            )
+            # Emergency is active - turn it OFF using centralized PIN helper
+            if stop_emergency_with_pin(self):
+                # Update button state immediately to show OFF status
+                self.update_emergency_button_state()
+                log.info("Emergency mode stopped - all activities stopped and data sent")
+        else:
+            # Emergency is not active - turn it ON (NO PIN REQUIRED)
+            settings = self.controller.config.get_settings()
+            emergency_settings = settings.get("emergency", {})
+            
+            if not emergency_settings.get("enabled", False):
+                messagebox.showwarning("Emergency Alert Disabled", 
+                                      "Emergency Alert feature is disabled. Please enable it in Settings.")
+                return
+            
+            if not emergency_settings.get("data_sharing_consent", False):
+                messagebox.showwarning("Consent Required", 
+                                      "You must consent to data sharing in Emergency Alert settings before using this feature.")
+                return
+            
+            # No PIN required to turn ON - show grace period window
+            # Update button to "Starting..." immediately for feedback
+            self.btn_emergency.config(text="⚠️ STARTING EMERGENCY MODE... ⚠️", bg="#FFA500", state="disabled")
+            
+            # Use trigger_alert_process to show grace period window
+            from alert_manager import trigger_alert_process
+            trigger_alert_process(self.controller)
+            # Update button state after grace period (will be updated when emergency actually starts)
+            self.after(500, self.update_emergency_button_state)
     
     def update_emergency_button_state(self):
-        """Update emergency button visibility based on emergency state"""
+        """Update emergency button text and styling based on emergency state"""
         from emergency_alert_manager import is_emergency_active
         
         try:
             emergency_active = is_emergency_active()
             
             if emergency_active:
-                # Update status label
-                self.lbl_emergency_status.config(text="Emergency Mode: ON", foreground="red")
-                # Show cancel button, hide emergency button and help text
-                self.btn_emergency.pack_forget()
+                # Update status label - make it very clear
+                self.lbl_emergency_status.config(text="⚠️ EMERGENCY MODE IS ON ⚠️", foreground="red", font=("Arial", 12, "bold"))
+                # Change button to show "Emergency Mode is ON - Click to Turn Off"
+                self.btn_emergency.config(
+                    text="🛑 EMERGENCY MODE IS ON - CLICK TO TURN OFF 🛑",
+                    bg="#FF6B35",  # Orange-red for turn off
+                    activebackground="#E55A2B",
+                    highlightbackground="#FFD700",
+                    highlightcolor="#FFD700",
+                    font=("Arial", 18, "bold"),
+                    state="normal"
+                )
+                # Hide help text when emergency is active
                 self.help_text.pack_forget()
-                # Make sure cancel button is visible and prominent
-                self.btn_cancel_emergency.pack(fill="x", padx=5, pady=8)
-                self.btn_cancel_emergency.lift()
             else:
                 # Update status label
-                self.lbl_emergency_status.config(text="Emergency Mode: OFF", foreground="green")
-                # Show emergency button and help text, hide cancel button
-                self.btn_emergency.pack(fill="x", padx=5, pady=5)
-                self.help_text.pack(fill="x", pady=(0, 10))
-                self.btn_cancel_emergency.pack_forget()
+                self.lbl_emergency_status.config(text="Emergency Mode: OFF", foreground="green", font=("Arial", 10, "bold"))
+                # Change button to show "Turn On"
+                self.btn_emergency.config(
+                    text="🚨 TURN ON EMERGENCY 🚨",
+                    bg="#DC143C",  # Crimson red for turn on
+                    activebackground="#B22222",
+                    highlightbackground="#8B0000",
+                    highlightcolor="#FF0000",
+                    font=("Arial", 20, "bold"),
+                    state="normal"
+                )
+                # Show help text when emergency is off
+                self.help_text.pack(fill="x", pady=(0, 10), padx=20)
         except Exception as e:
             log.error(f"Error updating emergency button state: {e}")
             import traceback
             log.error(traceback.format_exc())
-            # On error, try to show cancel button anyway if emergency might be active
-            try:
-                self.btn_cancel_emergency.pack(fill="x", padx=5, pady=8)
-            except:
-                pass
 
     def _on_emergency_state_changed(self):
         try:

@@ -2,10 +2,10 @@ import sounddevice as sd
 import wavio
 import time
 import os
-from config import config_manager
+from config import config_manager, DATA_DIR
 from logger_setup import log
 
-OUTPUT_DIR = "captures"
+OUTPUT_DIR = os.path.join(DATA_DIR, "captures")
 
 def get_device_name_and_time():
     try:
@@ -16,7 +16,16 @@ def get_device_name_and_time():
     return device_name, timestamp
 
 def capture_microphone_audio(duration_sec):
-    """Captures an audio clip from the default microphone for a specific duration."""
+    """Captures an audio clip from the default microphone for a specific duration.
+    
+    Args:
+        duration_sec: Duration in seconds (max 30 for emergency mode)
+    """
+    # Limit duration to 30 seconds max for emergency mode
+    if duration_sec > 30:
+        duration_sec = 30
+        log.warning(f"Microphone duration limited to 30 seconds for emergency mode")
+    
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
     device_name, timestamp = get_device_name_and_time()

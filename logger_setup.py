@@ -13,13 +13,36 @@ def setup_logging():
     if logger.hasHandlers():
         return logger
 
+    # Determine log path
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(base_dir, "app_data")
+    if not os.path.exists(data_dir):
+        try:
+            os.makedirs(data_dir)
+        except OSError:
+            data_dir = base_dir # Fallback
+            
+    log_path = os.path.join(data_dir, 'emoniter.log')
+
     # File Handler
-    file_handler = RotatingFileHandler(
-        'emoniter.log', 
-        maxBytes=2*1024*1024, 
-        backupCount=3,
-        encoding='utf-8'
-    )
+    # File Handler
+    try:
+        file_handler = RotatingFileHandler(
+            log_path, 
+            maxBytes=2*1024*1024, 
+            backupCount=3,
+            encoding='utf-8'
+        )
+    except PermissionError:
+        # If main file is locked (e.g., by main app), use a separate file for this process
+        log_path = os.path.join(data_dir, f'emoniter_trigger_{os.getpid()}.log')
+        file_handler = RotatingFileHandler(
+            log_path, 
+            maxBytes=2*1024*1024, 
+            backupCount=3,
+            encoding='utf-8'
+        )
     file_handler.setLevel(logging.INFO)
     file_formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'

@@ -3,10 +3,10 @@ import os
 import json
 from pynput import keyboard
 import threading
-from config import config_manager
+from config import config_manager, DATA_DIR
 from logger_setup import log
 
-OUTPUT_DIR = "captures"
+OUTPUT_DIR = os.path.join(DATA_DIR, "captures")
 
 data_lock = threading.Lock()
 key_counts = {
